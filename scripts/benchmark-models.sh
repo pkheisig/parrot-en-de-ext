@@ -22,9 +22,9 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 models="
-whisper-large-v3-quantized
-whisper-large-v3-turbo-quantized
-whisper-large-v3-turbo
+whisper-small|english
+whisper-large-v3-turbo|english
+whisper-large-v3-turbo-german-q5|german
 "
 status=0
 
@@ -33,12 +33,14 @@ echo "binary: $BINARY"
 echo "audio:  $*"
 echo
 
-for model in $models; do
+for entry in $models; do
+    model=${entry%%|*}
+    language=${entry#*|}
     output_file="$BENCHMARK_DIR/$model.out"
     error_file="$BENCHMARK_DIR/$model.err"
     echo "=== $model ==="
-    if "$BINARY" transcribe-file \
-        --language english \
+    if PARROT_PROFILE_MEMORY=1 "$BINARY" transcribe-file \
+        --language "$language" \
         --model-id "$model" \
         --benchmark \
         "$@" >"$output_file" 2>"$error_file"; then

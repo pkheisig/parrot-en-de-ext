@@ -9,6 +9,8 @@ actor WhisperCppTranscriber: Transcriber {
     private let dictionary: CorrectionDictionaryStore?
     private var context: OpaquePointer?
     private var loadTask: Task<Void, Error>?
+    private var maintenanceTask: Task<Void, Error>?
+    private let operationGate = AsyncOperationGate()
 
     init(model: TranscriptionModel, dictionary: CorrectionDictionaryStore? = nil) {
         self.model = model
@@ -23,13 +25,15 @@ actor WhisperCppTranscriber: Transcriber {
     }
 
     func warmUp() async throws {
-        if context != nil { return }
         if let loadTask {
             try await loadTask.value
             return
         }
+        if context != nil { return }
         let loadTask = Task { [self] in
-            try await loadContext()
+            try await withOperation(priority: .maintenance) {
+                try await loadContext()
+            }
         }
         self.loadTask = loadTask
         do {
@@ -39,6 +43,39 @@ actor WhisperCppTranscriber: Transcriber {
             self.loadTask = nil
             throw error
         }
+    }
+
+    /// Touch the Metal-backed context periodically so an idle app is less
+    /// likely to pay page-in or backend setup cost on the next dictation.
+    func keepWarm() async throws {
+        if context == nil || loadTask != nil {
+            try await warmUp()
+        }
+        if let maintenanceTask {
+            try await maintenanceTask.value
+            return
+        }
+        let maintenanceTask = Task { [self] in
+            try await withOperation(priority: .maintenance) {
+                try Task.checkCancellation()
+                _ = try decode(
+                    WhisperKitTranscriber.inferenceWarmUpAudio,
+                    includePrompt: false
+                )
+            }
+        }
+        self.maintenanceTask = maintenanceTask
+        do {
+            try await maintenanceTask.value
+            self.maintenanceTask = nil
+        } catch {
+            self.maintenanceTask = nil
+            throw error
+        }
+    }
+
+    func cancelKeepWarm() async {
+        maintenanceTask?.cancel()
     }
 
     private func loadContext() async throws {
@@ -60,11 +97,16 @@ actor WhisperCppTranscriber: Transcriber {
     }
 
     func transcribe(_ audio: [Float]) async throws -> String {
-        if context == nil { try await warmUp() }
-        guard let context else { throw TranscriberError.notLoaded }
+        if context == nil || loadTask != nil { try await warmUp() }
+        return try await withOperation(priority: .user) {
+            let memory = MemoryPeakTracker(label: "transcribe \(model.id)")
+            defer { memory.logFinish() }
+            return try decode(audio, includePrompt: true)
+        }
+    }
 
-        let memory = MemoryPeakTracker(label: "transcribe \(model.id)")
-        defer { memory.logFinish() }
+    private func decode(_ audio: [Float], includePrompt: Bool) throws -> String {
+        guard let context else { throw TranscriberError.notLoaded }
         var parameters = whisper_full_default_params(WHISPER_SAMPLING_GREEDY)
         parameters.print_realtime = false
         parameters.print_progress = false
@@ -91,7 +133,7 @@ actor WhisperCppTranscriber: Transcriber {
         }
 
         let result: Int32
-        if let prompt = dictionary?.promptText() {
+        if includePrompt, let prompt = dictionary?.promptText() {
             result = prompt.withCString { run(prompt: $0) }
         } else {
             result = run(prompt: nil)
@@ -113,10 +155,27 @@ actor WhisperCppTranscriber: Transcriber {
     }
 
     func unload() async {
+        await operationGate.acquire(priority: .user)
         if let context {
             whisper_free(context)
             self.context = nil
             RuntimeMemoryLog.write("unloaded \(model.id)")
+        }
+        await operationGate.release()
+    }
+
+    private func withOperation<T>(
+        priority: AsyncOperationGate.Priority,
+        operation: () async throws -> T
+    ) async throws -> T {
+        await operationGate.acquire(priority: priority)
+        do {
+            let result = try await operation()
+            await operationGate.release()
+            return result
+        } catch {
+            await operationGate.release()
+            throw error
         }
     }
 }

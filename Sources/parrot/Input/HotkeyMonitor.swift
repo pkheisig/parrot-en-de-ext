@@ -41,6 +41,9 @@ final class HotkeyMonitor {
         isLearningPressed = false
     }
 
+    fileprivate var currentShortcut: HotkeyShortcut { shortcut }
+    fileprivate var currentLearningShortcut: HotkeyShortcut { learningShortcut }
+
     func start(onEvent: @escaping (Event) -> Void) throws {
         self.onEvent = onEvent
 
@@ -180,6 +183,26 @@ final class HotkeyMonitor {
         }
     }
 
+    /// The event tap sees the entire keyboard stream. Filter it before the
+    /// callback schedules work on the main run loop; otherwise ordinary typing
+    /// creates one queued main-queue block per key-down and key-up.
+    static func isRelevantEvent(
+        type: CGEventType,
+        keyCode: CGKeyCode,
+        shortcut: HotkeyShortcut,
+        learningShortcut: HotkeyShortcut
+    ) -> Bool {
+        if type == .keyDown, keyCode == escapeKeyCode {
+            return true
+        }
+        if type == .flagsChanged {
+            return shortcut.isModifierOnly && keyCode == shortcut.keyCode
+        }
+        guard type == .keyDown || type == .keyUp else { return false }
+        return keyCode == shortcut.keyCode
+            || (!learningShortcut.isModifierOnly && keyCode == learningShortcut.keyCode)
+    }
+
     static func isCancelEvent(
         type: CGEventType,
         keyCode: CGKeyCode,
@@ -229,6 +252,16 @@ private func hotkeyCallback(
     // Delivery uses synthetic Unicode or Command-V events. Never interpret
     // those as a user hotkey, even if the configured shortcut overlaps.
     if HotkeyMonitor.isParrotGeneratedEvent(event) {
+        return Unmanaged.passUnretained(event)
+    }
+
+    let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
+    guard HotkeyMonitor.isRelevantEvent(
+        type: type,
+        keyCode: keyCode,
+        shortcut: monitor.currentShortcut,
+        learningShortcut: monitor.currentLearningShortcut
+    ) else {
         return Unmanaged.passUnretained(event)
     }
 

@@ -74,17 +74,29 @@ struct ProcessMemorySnapshot: Equatable {
     }
 }
 
+enum RuntimeDiagnostics {
+    /// Memory sampling calls task_info every 100 ms and writes one log line per
+    /// model operation. Keep it out of normal dictation; benchmarks opt in with
+    /// `PARROT_PROFILE_MEMORY=1`.
+    static var profileMemory: Bool {
+        ProcessInfo.processInfo.environment["PARROT_PROFILE_MEMORY"] == "1"
+    }
+}
+
 /// Samples process memory while a model operation is running. Core ML model
 /// specialization can create short-lived peaks that a before/after snapshot
 /// misses, so the tracker polls the process footprint during the operation.
 final class MemoryPeakTracker {
     private let lock = NSLock()
     private let label: String
+    private let enabled: Bool
     private var peak: ProcessMemorySnapshot?
     private var timer: DispatchSourceTimer?
 
     init(label: String, interval: TimeInterval = 0.10) {
         self.label = label
+        self.enabled = RuntimeDiagnostics.profileMemory
+        guard enabled else { return }
         peak = ProcessMemorySnapshot.current()
 
         let timer = DispatchSource.makeTimerSource(
@@ -108,6 +120,7 @@ final class MemoryPeakTracker {
     }
 
     func finish() -> ProcessMemorySnapshot? {
+        guard enabled else { return nil }
         timer?.cancel()
         timer = nil
         sample()
@@ -117,6 +130,7 @@ final class MemoryPeakTracker {
     }
 
     func logFinish() {
+        guard enabled else { return }
         guard let peak = finish() else {
             FileHandle.standardError.write(
                 Data("memory \(label) unavailable\n".utf8)
@@ -154,8 +168,8 @@ enum RuntimeMemoryLog {
 }
 
 /// Releases loaded models when macOS reports memory pressure. This is a
-/// safety net in addition to the normal idle timeout; it never touches model
-/// files in Application Support.
+/// safety net alongside periodic warming; it never touches model files in
+/// Application Support.
 final class RuntimeMemoryPressureMonitor {
     private let source: DispatchSourceMemoryPressure
 

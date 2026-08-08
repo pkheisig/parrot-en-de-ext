@@ -80,11 +80,15 @@ you explicitly want the slower 1.62 GB quality model. German remains an explicit
 548 MB whisper.cpp specialist and ignores the multilingual model selection.
 
 The app downloads, loads, and primes the selected model in the background at
-startup, then keeps it hot for fast repeated dictation. Only one inference model
-is kept resident: switching the language or model loads the replacement before
-releasing the inactive pipeline. macOS memory pressure remains the emergency
-unload path; a later dictation then reloads and re-primes the cached model. Audio
-remains on the Mac; only model downloads use the network.
+startup, then keeps it hot for fast repeated dictation. A low-priority,
+best-effort maintenance inference runs every five minutes to touch Core ML and
+Metal resources after long idle periods; user transcription always takes
+priority. Only one inference model is kept resident: switching the language or
+model loads the replacement before releasing the inactive pipeline. macOS
+memory pressure remains the emergency unload path, and the timer does not
+reload a model that macOS explicitly released until the user dictates again.
+This reduces cold-start risk but cannot guarantee that macOS keeps model pages
+in RAM. Audio remains on the Mac; only model downloads use the network.
 
 > **Note:** on most modern Macs the `fn` key is the bottom-left key. If you keep Fn as your shortcut and it is set to "Change input source" or "Show emoji & symbols," `parrot setup` will tell you how to flip it back to plain `fn`.
 
@@ -108,15 +112,15 @@ To compare model memory, latency, and output on local recordings:
 bash scripts/benchmark-models.sh /path/to/recording.wav
 ```
 
-The benchmark preserves all model files and prints the `memory ... peak ...`
-measurements emitted by Parrot. A speech corpus is required to make a quality
-claim; the script does not treat latency or model metadata as a transcription
-accuracy result.
+The benchmark preserves all model files and enables the opt-in
+`PARROT_PROFILE_MEMORY=1` process-footprint measurements emitted by Parrot. A
+speech corpus is required to make a quality claim; the script does not treat
+latency or model metadata as a transcription accuracy result.
 
 ## Stack
 
 - **Swift** — single SPM executable target
-- **WhisperKit** — Whisper inference via CoreML, ANE-accelerated
+- **WhisperKit** — Whisper inference via the tested CoreML CPU+GPU path
 - **whisper.cpp** — German specialist inference via Metal
 - **AVAudioEngine** — mic capture
 - **CGEventTap** — global hotkey

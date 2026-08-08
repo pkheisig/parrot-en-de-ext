@@ -8,6 +8,8 @@ actor WhisperKitTranscriber: Transcriber {
     private let defaultLanguage: TranscriptionLanguage
     private var pipeline: WhisperKit?
     private var loadTask: Task<Void, Error>?
+    private var maintenanceTask: Task<Void, Error>?
+    private let operationGate = AsyncOperationGate()
 
     init(
         model: TranscriptionModel,
@@ -23,13 +25,15 @@ actor WhisperKitTranscriber: Transcriber {
     /// runs one discarded inference so Core ML compilation cannot delay the
     /// user's first dictation.
     func warmUp() async throws {
-        if pipeline != nil { return }
         if let loadTask {
             try await loadTask.value
             return
         }
+        if pipeline != nil { return }
         let loadTask = Task { [self] in
-            try await loadPipeline()
+            try await withOperation(priority: .maintenance) {
+                try await loadPipeline()
+            }
         }
         self.loadTask = loadTask
         do {
@@ -39,6 +43,47 @@ actor WhisperKitTranscriber: Transcriber {
             self.loadTask = nil
             throw error
         }
+    }
+
+    /// Re-runs a discarded inference without rebuilding the pipeline. Core ML
+    /// can evict its device-specialized cache or let model pages go cold after
+    /// a long idle period even while the Swift object remains alive.
+    func keepWarm() async throws {
+        if pipeline == nil || loadTask != nil {
+            try await warmUp()
+        }
+
+        let started = Date()
+        if let maintenanceTask {
+            try await maintenanceTask.value
+            return
+        }
+        let maintenanceTask = Task { [self] in
+            try await withOperation(priority: .maintenance) {
+                try Task.checkCancellation()
+                guard let pipeline else { throw TranscriberError.notLoaded }
+                _ = try await pipeline.transcribe(
+                    audioArray: Self.inferenceWarmUpAudio,
+                    decodeOptions: Self.keepWarmDecodingOptions
+                )
+            }
+        }
+        self.maintenanceTask = maintenanceTask
+        do {
+            try await maintenanceTask.value
+            self.maintenanceTask = nil
+        } catch {
+            self.maintenanceTask = nil
+            throw error
+        }
+        let elapsed = Date().timeIntervalSince(started)
+        FileHandle.standardError.write(Data(
+            String(format: "  model keep-warm inference %.2fs\n", elapsed).utf8
+        ))
+    }
+
+    func cancelKeepWarm() async {
+        maintenanceTask?.cancel()
     }
 
     private func loadPipeline() async throws {
@@ -104,23 +149,26 @@ actor WhisperKitTranscriber: Transcriber {
     /// pipeline. Automatic routing uses this to detect and transcribe with one
     /// loaded model instead of keeping a separate detector resident.
     func transcribe(_ audio: [Float], languageCode: String?) async throws -> String {
-        if pipeline == nil { try await warmUp() }
-        guard let pipeline else { throw TranscriberError.notLoaded }
+        if pipeline == nil || loadTask != nil { try await warmUp() }
 
-        let memory = MemoryPeakTracker(label: "transcribe \(model.id)")
-        defer { memory.logFinish() }
-        let results = try await pipeline.transcribe(
-            audioArray: audio,
-            decodeOptions: Self.decodingOptions(languageCode: languageCode)
-        )
-        let raw = results.map(\.text).joined(separator: " ")
-        let sanitized = Self.sanitize(raw)
-        if sanitized.isEmpty, !raw.isEmpty {
-            FileHandle.standardError.write(Data(
-                "Whisper returned only non-speech tokens: \(raw)\n".utf8
-            ))
+        return try await withOperation(priority: .user) { [self] in
+            guard let pipeline else { throw TranscriberError.notLoaded }
+
+            let memory = MemoryPeakTracker(label: "transcribe \(model.id)")
+            defer { memory.logFinish() }
+            let results = try await pipeline.transcribe(
+                audioArray: audio,
+                decodeOptions: Self.decodingOptions(languageCode: languageCode)
+            )
+            let raw = results.map(\.text).joined(separator: " ")
+            let sanitized = Self.sanitize(raw)
+            if sanitized.isEmpty, !raw.isEmpty {
+                FileHandle.standardError.write(Data(
+                    "Whisper returned only non-speech tokens: \(raw)\n".utf8
+                ))
+            }
+            return sanitized
         }
-        return sanitized
     }
 
     func isLoaded() -> Bool {
@@ -128,13 +176,31 @@ actor WhisperKitTranscriber: Transcriber {
     }
 
     func unload() async {
-        guard let loadedPipeline = pipeline else { return }
-        // WhisperKit exposes an explicit lifecycle operation. Calling it
-        // before dropping the pipeline releases Core ML model weights now,
-        // rather than waiting for ARC/deinitialization to unwind later.
-        await loadedPipeline.unloadModels()
-        pipeline = nil
-        RuntimeMemoryLog.write("unloaded \(model.id)")
+        await operationGate.acquire(priority: .user)
+        if let loadedPipeline = pipeline {
+            // WhisperKit exposes an explicit lifecycle operation. Calling it
+            // before dropping the pipeline releases Core ML model weights now,
+            // rather than waiting for ARC/deinitialization to unwind later.
+            await loadedPipeline.unloadModels()
+            pipeline = nil
+            RuntimeMemoryLog.write("unloaded \(model.id)")
+        }
+        await operationGate.release()
+    }
+
+    private func withOperation<T>(
+        priority: AsyncOperationGate.Priority,
+        operation: () async throws -> T
+    ) async throws -> T {
+        await operationGate.acquire(priority: priority)
+        do {
+            let result = try await operation()
+            await operationGate.release()
+            return result
+        } catch {
+            await operationGate.release()
+            throw error
+        }
     }
 
     static func downloadModel(_ model: TranscriptionModel) async throws {
@@ -166,6 +232,14 @@ actor WhisperKitTranscriber: Transcriber {
             detectLanguage: shouldDetect
         )
     }
+
+    /// A fixed-language maintenance decode avoids spending time on language
+    /// detection while still exercising the same feature, encoder, prefill,
+    /// and decoder graph used by a real transcription.
+    static let keepWarmDecodingOptions = WhisperKitTranscriber.decodingOptions(
+        languageCode: "en",
+        detectLanguage: false
+    )
 
     /// Strip Whisper's non-speech bracket tokens ([BLANK_AUDIO], [MUSIC],
     /// (silence), <|nospeech|>, etc.) and collapse whitespace. When the model
@@ -231,6 +305,8 @@ actor TranscriptionService {
     private var activeLoads = 0
     private var cleanupRequested = false
     private var memoryPressurePending = false
+    private var warmupSuppressedAfterPressure = false
+    private var maintenanceWarmupActive = false
 
     init(
         model: TranscriptionModel,
@@ -272,6 +348,7 @@ actor TranscriptionService {
     }
 
     func warmUp() async throws {
+        warmupSuppressedAfterPressure = false
         activeLoads += 1
         do {
             if let explicitModel {
@@ -290,12 +367,45 @@ actor TranscriptionService {
             }
             await finishLoad()
         } catch {
-            activeLoads = max(0, activeLoads - 1)
+            await finishLoad()
+            throw error
+        }
+    }
+
+    /// Performs a maintenance inference only when the service is otherwise
+    /// idle. Returning false lets the scheduler skip a busy interval without
+    /// delaying user work or reloading a model that macOS intentionally
+    /// released under memory pressure.
+    func keepWarm() async throws -> Bool {
+        guard !warmupSuppressedAfterPressure,
+              activeTranscriptions == 0,
+              activeLoads == 0
+        else { return false }
+
+        activeLoads += 1
+        maintenanceWarmupActive = true
+        do {
+            if let explicitModel {
+                try await explicitModel.keepWarm()
+            } else {
+                try await transcriber(
+                    for: language,
+                    modelPreference: modelPreference
+                ).keepWarm()
+            }
+            maintenanceWarmupActive = false
+            await finishLoad()
+            return true
+        } catch {
+            maintenanceWarmupActive = false
+            await finishLoad()
             throw error
         }
     }
 
     func setLanguage(_ language: TranscriptionLanguage) async throws -> String? {
+        await cancelMaintenanceWarmupIfNeeded()
+        warmupSuppressedAfterPressure = false
         configurationRequest += 1
         let request = configurationRequest
         if let explicitModel {
@@ -310,7 +420,7 @@ actor TranscriptionService {
         do {
             try await next.warmUp()
         } catch {
-            activeLoads = max(0, activeLoads - 1)
+            await finishLoad()
             throw error
         }
         guard request == configurationRequest else {
@@ -329,6 +439,8 @@ actor TranscriptionService {
     func setModelPreference(
         _ modelPreference: TranscriptionModelPreference
     ) async throws -> String? {
+        await cancelMaintenanceWarmupIfNeeded()
+        warmupSuppressedAfterPressure = false
         configurationRequest += 1
         let request = configurationRequest
         if let explicitModel {
@@ -344,7 +456,7 @@ actor TranscriptionService {
         do {
             try await next.warmUp()
         } catch {
-            activeLoads = max(0, activeLoads - 1)
+            await finishLoad()
             throw error
         }
         guard request == configurationRequest else {
@@ -358,6 +470,8 @@ actor TranscriptionService {
     }
 
     func transcribe(_ audio: [Float]) async throws -> String {
+        await cancelMaintenanceWarmupIfNeeded()
+        warmupSuppressedAfterPressure = false
         activeTranscriptions += 1
         do {
             let raw: String
@@ -411,6 +525,8 @@ actor TranscriptionService {
     /// Called by the menu-bar process when macOS reports memory pressure.
     /// During a decode we defer release until the active operation has finished.
     func handleMemoryPressure() async {
+        warmupSuppressedAfterPressure = true
+        await cancelMaintenanceWarmupIfNeeded()
         if activeTranscriptions > 0 || activeLoads > 0 {
             memoryPressurePending = true
             cleanupRequested = true
@@ -483,6 +599,20 @@ actor TranscriptionService {
         memoryPressurePending = false
         cleanupRequested = false
         RuntimeMemoryLog.write("all-models-released")
+    }
+
+    private func cancelMaintenanceWarmupIfNeeded() async {
+        guard maintenanceWarmupActive else { return }
+        let activeTranscriber: any Transcriber
+        if let explicitModel {
+            activeTranscriber = explicitModel
+        } else {
+            activeTranscriber = transcriber(
+                for: language,
+                modelPreference: modelPreference
+            )
+        }
+        await activeTranscriber.cancelKeepWarm()
     }
 
     private nonisolated static func makeTranscriber(

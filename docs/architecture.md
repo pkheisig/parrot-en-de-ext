@@ -8,8 +8,9 @@
 4. **On-device.** No network calls for transcription. Audio never leaves the machine.
 5. **Memory-aware local inference.** Automatic detection and transcription use
    one multilingual model; Whisper Small is the default, model weights warm in
-   the background at app startup, stay resident for fast repeated use, and
-   release explicitly under memory pressure or configuration changes.
+   the background at app startup, receive periodic low-priority maintenance
+   inferences, and release explicitly under memory pressure or configuration
+   changes.
 6. **Language-specialized models.** German remains an explicit specialist for
    users who select German directly; full-size Large Turbo is available only as
    an explicit model selection.
@@ -28,7 +29,7 @@
 
 ## Why Swift
 
-- **CoreML / ANE access.** WhisperKit and FluidAudio are Swift-native and run inference on the Apple Neural Engine — lower power, lower latency than CPU/GPU paths in Rust.
+- **CoreML / Metal access.** WhisperKit is Swift-native and uses the tested CPU+GPU path on Apple Silicon; this avoids the unreliable Neural Engine compiler path observed on the supported machines.
 - **No FFI for platform APIs.** `AVAudioEngine`, `CGEventTap`, `CGEvent`, `AXIsProcessTrusted`, `NSWindow` — all first-party, no bindings to maintain.
 - **Permissions plumbing** (microphone, accessibility) is dramatically smoother in a Swift binary than via Rust crates.
 - **AppKit overlay for free.** The recording indicator (see below) is a borderless `NSWindow` — trivial in Swift, awkward in Rust.
@@ -86,7 +87,7 @@ Subcommands:
 
 ### `HotkeyMonitor`
 
-Global hotkey via `CGEventTap` (requires Accessibility permission). Default: **hold Fn**. Modifier-only shortcuts are detected through `flagsChanged`; shortcut combinations use key-down/key-up events with exact modifier matching. Emits `.pressed` / `.released`. The menu-bar shortcut recorder persists the selection in the `com.digimata.parrot` user-defaults suite.
+Global hotkey via `CGEventTap` (requires Accessibility permission). Default: **hold Fn**. Modifier-only shortcuts are detected through `flagsChanged`; shortcut combinations use key-down/key-up events with exact modifier matching. Unrelated keyboard events are rejected in the tap callback before they are dispatched to the main queue. Emits `.pressed` / `.released`. The menu-bar shortcut recorder persists the selection in the `com.digimata.parrot` user-defaults suite.
 
 **Fn key caveat:** macOS by default maps the Fn (🌐) key to "Show Emoji & Symbols" or "Start Dictation" depending on the user's setting in System Settings → Keyboard → Press 🌐 key to. The CGEventTap sees the keypress regardless, but the system action also fires. `parrot doctor` will detect this setting and instruct the user to change it to "Do Nothing" so Fn becomes a clean modifier.
 
@@ -101,10 +102,12 @@ truncating the last words. Escape stops capture and discards the recording.
 
 ```swift
 protocol Transcriber {
+    var modelID: String { get }
     func transcribe(_ audio: [Float]) async throws -> String
     func warmUp() async throws
+    func keepWarm() async throws
+    func cancelKeepWarm() async
     func unload() async
-    var modelID: String { get }
 }
 ```
 
@@ -130,17 +133,18 @@ delivered transcript.
 WhisperKit warm-up includes three discarded seconds of silence after model
 loading. This forces Core ML to compile its inference graphs before a model is
 reported ready, without conditioning or retaining any priming transcript. The
-app bundle does this in a background startup task; the foreground CLI blocks
-until warm-up completes before entering its monitoring loop. The selected model
-remains resident until the app exits; `WhisperKit.unloadModels()` or
-`whisper_free` is
-called when a pipeline becomes inactive after a language change, or when
-memory pressure requires release. Memory pressure defers release until an
-active decode completes.
+app bundle does this in a background startup task; the foreground CLI still
+warms before entering its monitoring loop. A five-minute low-priority scheduler
+then runs a discarded maintenance inference against the selected backend.
+This is a best-effort response to Core ML's device-specialized cache and mapped
+pages going cold; it cannot override macOS memory pressure. Memory pressure
+defers release until an active decode completes and suppresses timer-driven
+reload until the user requests another transcription.
 
 `RuntimeMemory.swift` samples RSS and physical footprint during model load and
-transcription. Those peaks are written to stderr so model comparisons measure
-the real process rather than relying on download-size estimates.
+transcription only when `PARROT_PROFILE_MEMORY=1` is set. This keeps task-info
+polling and per-operation logging out of ordinary dictation while preserving
+real process measurements for benchmarks.
 
 Adding an engine = one new file conforming to `Transcriber`.
 
@@ -159,7 +163,9 @@ the system clipboard and shows the same overlay capsule in a temporary **Copied
 to clipboard** state rather than typing into an unrelated window.
 
 The target application PID and the readable correction snapshot are captured at
-hotkey release, before asynchronous transcription can change timing or focus.
+hotkey release in parallel with transcription setup, before delivery can change
+timing or focus. This keeps Accessibility inspection off the critical path to
+the decoder while preserving release-time destination semantics.
 Delivery is transactional: Parrot snapshots the existing clipboard, stages the
 transcript with a guaranteed trailing separator space, and posts Command-V
 directly to the captured PID rather than global
@@ -206,7 +212,7 @@ Content: a small SwiftUI view hosted via `NSHostingView`, showing a pulsing dot 
 States:
 - **Hidden** — idle. No window on screen.
 - **Recording** — shown on `.pressed`, mic level animated.
-- **Transcribing** — brief spinner state between hotkey release and text injection (usually <500 ms).
+- **Transcribing** — brief spinner state between hotkey release and text injection while the selected decoder finishes.
 - **Hidden** — back to idle after injection.
 
 The recording overlay and menu-bar settings popover require the `NSApplication` run loop.
@@ -333,6 +339,11 @@ parrot/
     Parrot.swift                # entry point, argument parsing, NSApp.run()
     AppIdentity.swift           # bundle and status-item identities
     Doctor.swift
+
+    Runtime/                    # scheduling and diagnostics
+      AsyncOperationGate.swift
+      ModelWarmupScheduler.swift
+      RuntimeClock.swift
 
     Transcription/              # the inference layer
       Transcriber.swift         # protocol

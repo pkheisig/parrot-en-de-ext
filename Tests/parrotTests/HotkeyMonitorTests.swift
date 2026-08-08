@@ -40,6 +40,41 @@ final class HotkeyMonitorTests: XCTestCase {
         )
     }
 
+    func testUnrelatedKeyboardEventsAreFilteredBeforeMainQueueDispatch() {
+        XCTAssertFalse(
+            HotkeyMonitor.isRelevantEvent(
+                type: .keyDown,
+                keyCode: 0,
+                shortcut: .fn,
+                learningShortcut: .learnCorrection
+            )
+        )
+        XCTAssertFalse(
+            HotkeyMonitor.isRelevantEvent(
+                type: .keyUp,
+                keyCode: 49,
+                shortcut: .fn,
+                learningShortcut: .learnCorrection
+            )
+        )
+        XCTAssertTrue(
+            HotkeyMonitor.isRelevantEvent(
+                type: .flagsChanged,
+                keyCode: HotkeyShortcut.fn.keyCode,
+                shortcut: .fn,
+                learningShortcut: .learnCorrection
+            )
+        )
+        XCTAssertTrue(
+            HotkeyMonitor.isRelevantEvent(
+                type: .keyDown,
+                keyCode: HotkeyMonitor.escapeKeyCode,
+                shortcut: .fn,
+                learningShortcut: .learnCorrection
+            )
+        )
+    }
+
     func testLearningShortcutRequiresExactModifiersAndInitialKeyDown() {
         let shortcut = HotkeyShortcut.learnCorrection
         XCTAssertTrue(

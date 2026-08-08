@@ -15,6 +15,7 @@ final class RecordingOverlay {
 
     private var window: NSPanel?
     private let model = OverlayModel()
+    private let levelCoalescer = LevelUpdateCoalescer()
     private var pendingHide: DispatchWorkItem?
     private var pendingOrderOut: DispatchWorkItem?
 
@@ -25,6 +26,7 @@ final class RecordingOverlay {
         pendingOrderOut = nil
         ensureWindow()
         if state == .recording {
+            levelCoalescer.reset()
             model.resetLevels()
         }
         guard let window else { return }
@@ -87,8 +89,8 @@ final class RecordingOverlay {
 
     /// Push a new audio level (0…~1). Safe to call from any thread.
     nonisolated func pushLevel(_ level: Float) {
-        Task { @MainActor in
-            self.model.pushLevel(level)
+        levelCoalescer.submit(level) { [weak self] level in
+            self?.model.pushLevel(level)
         }
     }
 
@@ -124,6 +126,43 @@ final class RecordingOverlay {
         let x = visible.midX - frame.width / 2
         let y = visible.minY + 32
         window.setFrameOrigin(NSPoint(x: x, y: y))
+    }
+}
+
+/// Audio taps can deliver roughly 40–50 buffers per second. Keep only the
+/// latest level and render at most once every 50 ms so waveform updates cannot
+/// build a main-queue backlog around hotkey release or transcript delivery.
+private final class LevelUpdateCoalescer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var latest: Float = 0
+    private var deliveryScheduled = false
+
+    func submit(_ level: Float, deliver: @escaping @MainActor (Float) -> Void) {
+        lock.lock()
+        latest = level
+        guard !deliveryScheduled else {
+            lock.unlock()
+            return
+        }
+        deliveryScheduled = true
+        lock.unlock()
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            guard let self else { return }
+            self.lock.lock()
+            let level = self.latest
+            self.deliveryScheduled = false
+            self.lock.unlock()
+            MainActor.assumeIsolated {
+                deliver(level)
+            }
+        }
+    }
+
+    func reset() {
+        lock.lock()
+        latest = 0
+        lock.unlock()
     }
 }
 

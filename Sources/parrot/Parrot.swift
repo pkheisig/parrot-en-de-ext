@@ -131,6 +131,9 @@ struct Run: ParsableCommand {
                 await transcriptionService.handleMemoryPressure()
             }
         }
+        let modelWarmupScheduler = ModelWarmupScheduler {
+            try await transcriptionService.keepWarm()
+        }
 
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
@@ -164,8 +167,7 @@ struct Run: ParsableCommand {
         var activationMode = settings.activationMode
         var recordingMode = activationMode
         var isRecording = false
-        var recordingTarget: TextInjector.Target?
-        var recordingSnapshot: FocusedTextSnapshot?
+        var recordingContextTask: Task<DeliveryContext, Never>?
         let readiness = MainActor.assumeIsolated {
             RuntimeReadiness(modelReady: !isAppBundle)
         }
@@ -245,9 +247,16 @@ struct Run: ParsableCommand {
                 }
                 if recordingMode == .toggle, isRecording {
                     isRecording = false
-                    let deliveryTarget = TextInjector.captureTarget() ?? recordingTarget
-                    let deliverySnapshot = FocusedTextSnapshot.capture() ?? recordingSnapshot
+                    let releaseTime = RuntimeClock.now()
+                    let initialContextTask = recordingContextTask
+                    recordingContextTask = nil
+                    let releaseContextTask = Task { @MainActor in
+                        guard !Task.isCancelled else { return DeliveryContext() }
+                        return DeliveryContext.capture()
+                    }
+                    let stopStarted = RuntimeClock.now()
                     let samples = capture.stop()
+                    let captureStopElapsed = RuntimeClock.seconds(since: stopStarted)
                     transcribe(
                         samples: samples,
                         transcriptionService: transcriptionService,
@@ -255,16 +264,14 @@ struct Run: ParsableCommand {
                         menuBar: menuBar,
                         dumpWav: dumpWav,
                         learningController: learningController,
-                        deliveryTarget: deliveryTarget,
-                        deliverySnapshot: deliverySnapshot
+                        initialDeliveryContext: initialContextTask,
+                        releaseDeliveryContext: releaseContextTask,
+                        releaseTime: releaseTime,
+                        captureStopElapsed: captureStopElapsed
                     )
-                    recordingTarget = nil
-                    recordingSnapshot = nil
                     return
                 }
                 guard !isRecording else { return }
-                recordingTarget = TextInjector.captureTarget()
-                recordingSnapshot = FocusedTextSnapshot.capture()
                 recordingMode = activationMode
                 do {
                     try capture.start()
@@ -273,6 +280,10 @@ struct Run: ParsableCommand {
                     return
                 }
                 isRecording = true
+                recordingContextTask = Task { @MainActor in
+                    guard !Task.isCancelled else { return DeliveryContext() }
+                    return DeliveryContext.capture()
+                }
                 FileHandle.standardError.write(Data("● recording\n".utf8))
                 MainActor.assumeIsolated {
                     overlay?.show(.recording)
@@ -281,9 +292,16 @@ struct Run: ParsableCommand {
             case .released:
                 guard recordingMode == .hold, isRecording else { return }
                 isRecording = false
-                let deliveryTarget = TextInjector.captureTarget() ?? recordingTarget
-                let deliverySnapshot = FocusedTextSnapshot.capture() ?? recordingSnapshot
+                let releaseTime = RuntimeClock.now()
+                let initialContextTask = recordingContextTask
+                recordingContextTask = nil
+                let releaseContextTask = Task { @MainActor in
+                    guard !Task.isCancelled else { return DeliveryContext() }
+                    return DeliveryContext.capture()
+                }
+                let stopStarted = RuntimeClock.now()
                 let samples = capture.stop()
+                let captureStopElapsed = RuntimeClock.seconds(since: stopStarted)
                 transcribe(
                     samples: samples,
                     transcriptionService: transcriptionService,
@@ -291,17 +309,17 @@ struct Run: ParsableCommand {
                     menuBar: menuBar,
                     dumpWav: dumpWav,
                     learningController: learningController,
-                    deliveryTarget: deliveryTarget,
-                    deliverySnapshot: deliverySnapshot
+                    initialDeliveryContext: initialContextTask,
+                    releaseDeliveryContext: releaseContextTask,
+                    releaseTime: releaseTime,
+                    captureStopElapsed: captureStopElapsed
                 )
-                recordingTarget = nil
-                recordingSnapshot = nil
             case .cancelRequested:
                 guard isRecording else { return }
                 isRecording = false
                 _ = capture.stop()
-                recordingTarget = nil
-                recordingSnapshot = nil
+                recordingContextTask?.cancel()
+                recordingContextTask = nil
                 FileHandle.standardError.write(Data("recording canceled\n".utf8))
                 MainActor.assumeIsolated {
                     overlay?.hide()
@@ -403,6 +421,7 @@ struct Run: ParsableCommand {
                 }
                 await MainActor.run {
                     readiness.modelReady = true
+                    modelWarmupScheduler.start()
                     if readiness.monitorStarted {
                         menuBar?.setReady(
                             modelID: readyModelID,
@@ -428,6 +447,7 @@ struct Run: ParsableCommand {
                 FileHandle.standardError.write(Data("warmup failed: \(warmupError)\n".utf8))
                 throw ExitCode(1)
             }
+            modelWarmupScheduler.start()
             do {
                 try monitor.start(onEvent: handleHotkey)
             } catch {
@@ -439,6 +459,7 @@ struct Run: ParsableCommand {
         let sigint = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
         sigint.setEventHandler {
             FileHandle.standardError.write(Data("\nshutting down\n".utf8))
+            modelWarmupScheduler.stop()
             monitor.stop()
             NSApp.terminate(nil)
         }
@@ -450,7 +471,9 @@ struct Run: ParsableCommand {
                 .utf8
         ))
         withExtendedLifetime(memoryPressureMonitor) {
-            app.run()
+            withExtendedLifetime(modelWarmupScheduler) {
+                app.run()
+            }
         }
     }
 }
@@ -465,6 +488,26 @@ private final class RuntimeReadiness {
     }
 }
 
+private struct DeliveryContext: Sendable {
+    let target: TextInjector.Target?
+    let snapshot: FocusedTextSnapshot?
+
+    init(
+        target: TextInjector.Target? = nil,
+        snapshot: FocusedTextSnapshot? = nil
+    ) {
+        self.target = target
+        self.snapshot = snapshot
+    }
+
+    static func capture() -> DeliveryContext {
+        DeliveryContext(
+            target: TextInjector.captureTarget(),
+            snapshot: FocusedTextSnapshot.capture()
+        )
+    }
+}
+
 private func transcribe(
     samples: [Float],
     transcriptionService: TranscriptionService,
@@ -472,41 +515,61 @@ private func transcribe(
     menuBar: MenuBarController?,
     dumpWav: Bool,
     learningController: CorrectionLearningController,
-    deliveryTarget: TextInjector.Target?,
-    deliverySnapshot: FocusedTextSnapshot?
+    initialDeliveryContext: Task<DeliveryContext, Never>?,
+    releaseDeliveryContext: Task<DeliveryContext, Never>,
+    releaseTime: UInt64,
+    captureStopElapsed: Double
 ) {
     MainActor.assumeIsolated {
         overlay?.show(.transcribing)
         menuBar?.setTranscribing()
     }
-    let seconds = Double(samples.count) / AudioCapture.targetSampleRate
-    let rms = computeRMS(samples)
-    FileHandle.standardError.write(Data(
-        String(format: "○ captured %.2fs · rms %.3f\n", seconds, rms).utf8
-    ))
-    if dumpWav, !samples.isEmpty {
-        let path = "/tmp/parrot-last.wav"
+    Task(priority: .userInitiated) {
         do {
-            try WAVWriter.write(samples: samples, sampleRate: 16_000, to: path)
-            FileHandle.standardError.write(Data("  wrote \(path)\n".utf8))
-        } catch {
-            FileHandle.standardError.write(Data("  wav write failed: \(error)\n".utf8))
-        }
-    }
-    guard !samples.isEmpty else {
-        MainActor.assumeIsolated {
-            overlay?.hide()
-            menuBar?.setRecording(false)
-        }
-        return
-    }
-    Task {
-        let started = Date()
-        do {
-            let text = try await transcriptionService.transcribe(samples)
-            let elapsed = Date().timeIntervalSince(started)
+            let queueDelay = RuntimeClock.seconds(since: releaseTime)
+            let taskDelayAfterStop = queueDelay - captureStopElapsed
+            let seconds = Double(samples.count) / AudioCapture.targetSampleRate
+            let rms = computeRMS(samples)
             FileHandle.standardError.write(Data(
-                String(format: "→ %.2fs · %@\n", elapsed, text).utf8
+                String(format: "○ captured %.2fs · rms %.3f\n", seconds, rms).utf8
+            ))
+            if dumpWav, !samples.isEmpty {
+                let path = "/tmp/parrot-last.wav"
+                do {
+                    try WAVWriter.write(samples: samples, sampleRate: 16_000, to: path)
+                    FileHandle.standardError.write(Data("  wrote \(path)\n".utf8))
+                } catch {
+                    FileHandle.standardError.write(Data("  wav write failed: \(error)\n".utf8))
+                }
+            }
+            guard !samples.isEmpty else {
+                await MainActor.run {
+                    overlay?.hide()
+                    menuBar?.setRecording(false)
+                }
+                return
+            }
+
+            let started = RuntimeClock.now()
+            let text = try await transcriptionService.transcribe(samples)
+            let elapsed = RuntimeClock.seconds(since: started)
+            let releaseContext = await releaseDeliveryContext.value
+            let initialContext: DeliveryContext
+            if let initialDeliveryContext {
+                initialContext = await initialDeliveryContext.value
+            } else {
+                initialContext = DeliveryContext()
+            }
+            let deliveryTarget = releaseContext.target ?? initialContext.target
+            let deliverySnapshot = releaseContext.snapshot ?? initialContext.snapshot
+            FileHandle.standardError.write(Data(
+                String(
+                    format: "→ decode %.2fs · stop %.3fs · stop→task %.3fs · %@\n",
+                    elapsed,
+                    captureStopElapsed,
+                    max(0, taskDelayAfterStop),
+                    text
+                ).utf8
             ))
             await deliverTranscript(
                 text,
