@@ -228,9 +228,33 @@ actor WhisperKitTranscriber: Transcriber {
         return DecodingOptions(
             task: .transcribe,
             language: languageCode,
+            // Interactive dictation only needs the text. Avoid producing
+            // timestamp tokens and limit fallback retries, both of which can
+            // multiply decoder work on long recordings.
+            temperatureFallbackCount: 1,
             usePrefillPrompt: true,
-            detectLanguage: shouldDetect
+            detectLanguage: shouldDetect,
+            skipSpecialTokens: true,
+            withoutTimestamps: true,
+            // WhisperKit's VAD chunk path transcribes independent windows
+            // concurrently. Automatic mode uses fewer workers because each
+            // chunk also performs language detection.
+            concurrentWorkerCount: shouldDetect
+                ? Self.automaticWorkerCount
+                : Self.longFormWorkerCount,
+            chunkingStrategy: .vad
         )
+    }
+
+    /// Four workers saturate the tested M1 Pro GPU without the memory spike
+    /// of WhisperKit's macOS default of sixteen. This is only used when VAD
+    /// has split a recording into multiple windows.
+    static var longFormWorkerCount: Int {
+        max(2, min(4, ProcessInfo.processInfo.processorCount / 2))
+    }
+
+    static var automaticWorkerCount: Int {
+        max(1, min(2, ProcessInfo.processInfo.processorCount / 4))
     }
 
     /// A fixed-language maintenance decode avoids spending time on language

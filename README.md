@@ -74,9 +74,11 @@ Entries are stored locally at
 
 The **Language** setting supports English, German, or Automatic recognition.
 English and Automatic use multilingual **Whisper Small** by default. Automatic
-detects the language and produces the transcript in one decode; it does not run
-a separate detector pass. Select **Large Turbo** in the **Model** setting when
-you explicitly want the slower 1.62 GB quality model. German remains an explicit
+detects the language inside one transcription request; it does not run a
+separate detector pass. Long WhisperKit recordings are split at VAD-aligned
+boundaries and decoded with bounded concurrency, while the text-only path skips
+timestamp generation. Select **Large Turbo** in the **Model** setting when you
+explicitly want the slower 1.62 GB quality model. German remains an explicit
 548 MB whisper.cpp specialist and ignores the multilingual model selection.
 
 The app downloads, loads, and primes the selected model in the background at

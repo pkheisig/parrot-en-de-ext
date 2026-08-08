@@ -122,13 +122,17 @@ Concrete implementations:
 
 `TranscriptionService` owns the language/model selection and lifecycle.
 Automatic mode asks the selected multilingual WhisperKit pipeline to detect and
-transcribe in one decode. It does not retain a separate detector or specialist.
-Selecting German explicitly uses the pinned whisper.cpp specialist.
+transcribe within one transcription request. Known-language WhisperKit requests
+use VAD-aligned windows with bounded concurrency for long recordings; automatic
+mode uses fewer workers because each window also detects language. It does not
+retain a separate detector or specialist. Selecting German explicitly uses the
+pinned whisper.cpp specialist.
 
 Every language mode records the complete utterance before starting one
 full-context transcription. In Automatic mode, language detection is part of
-that same decode. No provisional streaming segment can become part of the
-delivered transcript.
+that same request. The delivered text path does not generate timestamps and
+limits fallback retries because Parrot does not display timing metadata. No
+provisional streaming segment can become part of the delivered transcript.
 
 WhisperKit warm-up includes three discarded seconds of silence after model
 loading. This forces Core ML to compile its inference graphs before a model is

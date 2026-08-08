@@ -112,6 +112,7 @@ actor WhisperCppTranscriber: Transcriber {
         parameters.print_progress = false
         parameters.print_timestamps = false
         parameters.print_special = false
+        parameters.no_timestamps = true
         parameters.translate = false
         parameters.no_context = true
         parameters.single_segment = false
