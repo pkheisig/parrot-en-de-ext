@@ -122,9 +122,9 @@ Concrete implementations:
 
 `TranscriptionService` owns the language/model selection and lifecycle.
 Automatic mode asks the selected multilingual WhisperKit pipeline to detect and
-transcribe within one transcription request. Known-language WhisperKit requests
-use VAD-aligned windows with bounded concurrency for long recordings; automatic
-mode uses fewer workers because each window also detects language. It does not
+transcribe within one transcription request. Long WhisperKit requests use
+VAD-aligned windows, but decode them serially because Core ML's Metal pipeline
+is shared and concurrent chunk predictions can race backend buffers. It does not
 retain a separate detector or specialist. Selecting German explicitly uses the
 pinned whisper.cpp specialist.
 
@@ -138,8 +138,12 @@ WhisperKit warm-up includes three discarded seconds of silence after model
 loading. This forces Core ML to compile its inference graphs before a model is
 reported ready, without conditioning or retaining any priming transcript. The
 app bundle does this in a background startup task; the foreground CLI still
-warms before entering its monitoring loop. A five-minute low-priority scheduler
-then runs a discarded maintenance inference against the selected backend.
+warms before entering its monitoring loop. A two-minute low-priority scheduler
+then runs a discarded maintenance inference against the selected backend. A
+model not touched for 90 seconds is also refreshed when recording begins, which
+hides page-in and graph setup behind speech. In-flight backend warm-ups are
+allowed to drain through the same serial operation gate rather than being
+cancelled while Core ML may still own Metal work.
 This is a best-effort response to Core ML's device-specialized cache and mapped
 pages going cold; it cannot override macOS memory pressure. Memory pressure
 defers release until an active decode completes and suppresses timer-driven

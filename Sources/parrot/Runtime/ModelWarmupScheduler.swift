@@ -6,7 +6,7 @@ import Foundation
 /// memory under pressure, and the scheduler must never prevent the app from
 /// responding to a real dictation.
 final class ModelWarmupScheduler: @unchecked Sendable {
-    static let defaultInterval: TimeInterval = 5 * 60
+    static let defaultInterval: TimeInterval = 2 * 60
 
     private let intervalNanoseconds: UInt64
     private let warm: @Sendable () async throws -> Bool

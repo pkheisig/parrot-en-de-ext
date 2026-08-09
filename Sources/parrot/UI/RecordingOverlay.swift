@@ -218,9 +218,7 @@ private struct OverlayPill: View {
             Waveform(levels: model.levels)
                 .frame(width: 54, height: 22)
         case .transcribing:
-            ProgressView()
-                .controlSize(.small)
-                .scaleEffect(0.8)
+            TranscriptionSpinner()
                 .frame(width: 54, height: 22)
         case .copiedToClipboard:
             HStack(spacing: 7) {
@@ -243,6 +241,26 @@ private struct OverlayPill: View {
             .foregroundStyle(Color(red: 255/255.0, green: 184/255.0, blue: 148/255.0))
             .frame(height: 22)
         }
+    }
+}
+
+private struct TranscriptionSpinner: View {
+    private let color = Color(red: 181/255.0, green: 209/255.0, blue: 255/255.0)
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
+            let phase = timeline.date.timeIntervalSinceReferenceDate
+                .truncatingRemainder(dividingBy: 0.8) / 0.8
+            Circle()
+                .trim(from: 0.12, to: 0.82)
+                .stroke(
+                    color,
+                    style: StrokeStyle(lineWidth: 2.4, lineCap: .round)
+                )
+                .rotationEffect(.degrees(phase * 360))
+        }
+        .frame(width: 16, height: 16)
+        .accessibilityLabel("Transcribing")
     }
 }
 

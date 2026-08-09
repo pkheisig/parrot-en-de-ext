@@ -58,6 +58,11 @@ actor WhisperCppTranscriber: Transcriber {
         let maintenanceTask = Task { [self] in
             try await withOperation(priority: .maintenance) {
                 try Task.checkCancellation()
+                let activity = ProcessInfo.processInfo.beginActivity(
+                    options: [.userInitiated, .latencyCritical],
+                    reason: "Keep the active Parrot transcription model responsive"
+                )
+                defer { ProcessInfo.processInfo.endActivity(activity) }
                 _ = try decode(
                     WhisperKitTranscriber.inferenceWarmUpAudio,
                     includePrompt: false
@@ -75,7 +80,8 @@ actor WhisperCppTranscriber: Transcriber {
     }
 
     func cancelKeepWarm() async {
-        maintenanceTask?.cancel()
+        // Let an in-flight Metal decode drain before user work enters the gate.
+        // Canceling the Swift task does not guarantee backend work has stopped.
     }
 
     private func loadContext() async throws {

@@ -28,6 +28,30 @@ final class RuntimeWarmupTests: XCTestCase {
     }
 
     func testDefaultWarmupIntervalIsLongEnoughToAvoidBusyPolling() {
-        XCTAssertEqual(ModelWarmupScheduler.defaultInterval, 5 * 60)
+        XCTAssertEqual(ModelWarmupScheduler.defaultInterval, 2 * 60)
+    }
+
+    func testRecordingPreparationOnlyRunsWhenModelIsStale() {
+        let now = Date(timeIntervalSinceReferenceDate: 10_000)
+        XCTAssertFalse(TranscriptionService.needsRecordingWarmup(
+            lastModelTouchAt: now.addingTimeInterval(-89),
+            now: now,
+            wasReleasedUnderPressure: false
+        ))
+        XCTAssertTrue(TranscriptionService.needsRecordingWarmup(
+            lastModelTouchAt: now.addingTimeInterval(-90),
+            now: now,
+            wasReleasedUnderPressure: false
+        ))
+        XCTAssertTrue(TranscriptionService.needsRecordingWarmup(
+            lastModelTouchAt: nil,
+            now: now,
+            wasReleasedUnderPressure: false
+        ))
+        XCTAssertTrue(TranscriptionService.needsRecordingWarmup(
+            lastModelTouchAt: now,
+            now: now,
+            wasReleasedUnderPressure: true
+        ))
     }
 }

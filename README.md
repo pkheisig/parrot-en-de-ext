@@ -76,16 +76,17 @@ The **Language** setting supports English, German, or Automatic recognition.
 English and Automatic use multilingual **Whisper Small** by default. Automatic
 detects the language inside one transcription request; it does not run a
 separate detector pass. Long WhisperKit recordings are split at VAD-aligned
-boundaries and decoded with bounded concurrency, while the text-only path skips
-timestamp generation. Select **Large Turbo** in the **Model** setting when you
+boundaries and decoded serially on the shared GPU pipeline, while the text-only
+path skips timestamp generation. Select **Large Turbo** in the **Model** setting when you
 explicitly want the slower 1.62 GB quality model. German remains an explicit
 548 MB whisper.cpp specialist and ignores the multilingual model selection.
 
 The app downloads, loads, and primes the selected model in the background at
 startup, then keeps it hot for fast repeated dictation. A low-priority,
-best-effort maintenance inference runs every five minutes to touch Core ML and
-Metal resources after long idle periods; user transcription always takes
-priority. Only one inference model is kept resident: switching the language or
+best-effort maintenance inference runs every two minutes to touch Core ML and
+Metal resources after long idle periods. If the last model touch is stale,
+Parrot also refreshes it when recording starts so page-in happens while you
+speak instead of after you stop. Only one inference model is kept resident: switching the language or
 model loads the replacement before releasing the inactive pipeline. macOS
 memory pressure remains the emergency unload path, and the timer does not
 reload a model that macOS explicitly released until the user dictates again.

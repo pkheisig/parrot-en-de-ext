@@ -289,6 +289,19 @@ struct Run: ParsableCommand {
                     overlay?.show(.recording)
                     menuBar?.setRecording(true)
                 }
+                Task(priority: .userInitiated) {
+                    do {
+                        if try await transcriptionService.prepareForRecording() {
+                            FileHandle.standardError.write(Data(
+                                "model refreshed during recording\n".utf8
+                            ))
+                        }
+                    } catch {
+                        FileHandle.standardError.write(Data(
+                            "recording-start warmup failed: \(error)\n".utf8
+                        ))
+                    }
+                }
             case .released:
                 guard recordingMode == .hold, isRecording else { return }
                 isRecording = false
