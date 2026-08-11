@@ -195,8 +195,11 @@ transcript.
 Persists universal `recognized → canonical` mappings in Application Support.
 The alias records what the model previously heard; canonical terms are encoded
 as prompt tokens for WhisperKit and passed as the whisper.cpp initial prompt.
-This conditions English, German, and Automatic recognition before a transcript
-is returned. Parrot does not rewrite the completed transcript afterward.
+WhisperKit first performs an unbiased decode. If that result contains a learned
+alias, Parrot decodes the same audio again in the detected language with only
+the matching canonical spelling in context. This keeps vocabulary out of
+Automatic language detection and unrelated dictation. Parrot does not rewrite
+the completed transcript afterward.
 
 ### `RecordingOverlay`
 

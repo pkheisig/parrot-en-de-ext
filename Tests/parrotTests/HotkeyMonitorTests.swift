@@ -113,17 +113,28 @@ final class HotkeyMonitorTests: XCTestCase {
             isModifierOnly: false
         )
         let monitor = HotkeyMonitor(learningShortcut: shortcut)
+        let emitted = expectation(description: "learn event emitted after key release")
+        var emissionCount = 0
+        monitor.onEvent = { event in
+            if case .learnCorrectionRequested = event {
+                emissionCount += 1
+                emitted.fulfill()
+            }
+        }
         let down = try XCTUnwrap(
             CGEvent(keyboardEventSource: nil, virtualKey: 37, keyDown: true)
         )
         down.flags = .maskCommand
         XCTAssertTrue(monitor.interceptLearning(type: .keyDown, event: down))
+        XCTAssertEqual(emissionCount, 0)
 
         let up = try XCTUnwrap(
             CGEvent(keyboardEventSource: nil, virtualKey: 37, keyDown: false)
         )
         up.flags = .maskCommand
         XCTAssertTrue(monitor.interceptLearning(type: .keyUp, event: up))
+        wait(for: [emitted], timeout: 0.5)
+        XCTAssertEqual(emissionCount, 1)
 
         let wrongModifiers = try XCTUnwrap(
             CGEvent(keyboardEventSource: nil, virtualKey: 37, keyDown: true)

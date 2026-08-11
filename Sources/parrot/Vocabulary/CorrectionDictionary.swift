@@ -139,10 +139,33 @@ final class CorrectionDictionaryStore: @unchecked Sendable {
     /// the newest learned spellings. Whisper keeps the suffix when it has to
     /// trim a prompt, so the most recently learned terms are emitted last.
     func promptText(maximumCharacters: Int = 700) -> String? {
+        promptText(from: entries, maximumCharacters: maximumCharacters)
+    }
+
+    /// Returns only spellings associated with something Whisper actually
+    /// rendered in this utterance. The same audio can then be re-decoded with
+    /// focused context instead of biasing every dictation globally.
+    func promptText(
+        matching transcript: String,
+        maximumCharacters: Int = 700
+    ) -> String? {
+        let matchingEntries = entries.filter {
+            Self.containsAlias($0.alias, in: transcript)
+        }
+        return promptText(
+            from: matchingEntries,
+            maximumCharacters: maximumCharacters
+        )
+    }
+
+    private func promptText(
+        from candidates: [CorrectionEntry],
+        maximumCharacters: Int
+    ) -> String? {
         var seen = Set<String>()
         var sentences: [String] = []
         var length = 0
-        for entry in entries {
+        for entry in candidates {
             let key = Self.normalized(entry.canonical)
             guard seen.insert(key).inserted else { continue }
             let sentence = "Technical vocabulary includes \(entry.canonical)."
@@ -198,6 +221,17 @@ final class CorrectionDictionaryStore: @unchecked Sendable {
 
     private static func normalized(_ value: String) -> String {
         clean(value).lowercased()
+    }
+
+    private static func containsAlias(_ alias: String, in text: String) -> Bool {
+        let escaped = NSRegularExpression.escapedPattern(for: alias)
+        let pattern = #"(?<![\p{L}\p{N}])\#(escaped)(?![\p{L}\p{N}])"#
+        guard let expression = try? NSRegularExpression(
+            pattern: pattern,
+            options: [.caseInsensitive]
+        ) else { return false }
+        let range = NSRange(text.startIndex..., in: text)
+        return expression.firstMatch(in: text, range: range) != nil
     }
 
     private static func isValid(_ value: String) -> Bool {

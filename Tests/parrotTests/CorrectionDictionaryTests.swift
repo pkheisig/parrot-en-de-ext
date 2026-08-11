@@ -43,6 +43,20 @@ final class CorrectionDictionaryTests: XCTestCase {
         )
     }
 
+    func testFocusedPromptOnlyIncludesAliasesRenderedInThisTranscript() {
+        let store = CorrectionDictionaryStore(persistent: false)
+        store.upsert(alias: "spectrizy", canonical: "Spectreasy")
+        store.upsert(alias: "omelet", canonical: "OMIP")
+
+        XCTAssertEqual(
+            store.promptText(matching: "We opened spectrizy for the analysis."),
+            "Technical vocabulary includes Spectreasy."
+        )
+        XCTAssertNil(
+            store.promptText(matching: "This sentence contains neither learned rendering.")
+        )
+    }
+
     func testPersistsAndReloadsEntries() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("parrot-dictionary-\(UUID().uuidString)")

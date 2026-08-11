@@ -123,22 +123,11 @@ actor WhisperKitTranscriber: Transcriber {
 
             let memory = MemoryPeakTracker(label: "transcribe \(model.id)")
             defer { memory.logFinish() }
-            let fallbackOptions = Self.decodingOptions(languageCode: languageCode)
-            var options = fallbackOptions
-            var usesVocabularyPrompt = false
-            if let prompt = dictionary?.promptText(),
-               let tokenizer = pipeline.tokenizer {
-                options.promptTokens = tokenizer
-                    .encode(text: " " + prompt)
-                    .filter { $0 < tokenizer.specialTokens.specialTokenBegin }
-                // WhisperKit cannot reuse its fixed prefill cache when custom
-                // prompt tokens precede the language/task tokens.
-                options.usePrefillPrompt = true
-                options.usePrefillCache = false
-                usesVocabularyPrompt = true
-            }
+            let baselineOptions = Self.decodingOptions(languageCode: languageCode)
 
-            func decode(_ decodeOptions: DecodingOptions) async throws -> String {
+            func decode(
+                _ decodeOptions: DecodingOptions
+            ) async throws -> (text: String, language: String?) {
                 let results = try await pipeline.transcribe(
                     audioArray: audio,
                     decodeOptions: decodeOptions
@@ -150,23 +139,48 @@ actor WhisperKitTranscriber: Transcriber {
                         "Whisper returned only non-speech tokens: \(raw)\n".utf8
                     ))
                 }
-                return sanitized
+                return (sanitized, results.first?.language)
             }
+
+            // First preserve Whisper's normal audio-led recognition. Only when
+            // that transcript contains a previously learned rendering do we
+            // decode the same audio again with the associated spelling in its
+            // context. This avoids globally biasing unrelated dictation and,
+            // in Automatic mode, keeps prompt tokens out of language detection.
+            let baseline = try await decode(baselineOptions)
+            guard !baseline.text.isEmpty,
+                  let prompt = dictionary?.promptText(matching: baseline.text),
+                  let tokenizer = pipeline.tokenizer
+            else { return baseline.text }
+
+            let resolvedLanguage = languageCode ?? baseline.language
+            var promptedOptions = Self.decodingOptions(
+                languageCode: resolvedLanguage,
+                detectLanguage: false
+            )
+            promptedOptions.promptTokens = tokenizer
+                .encode(text: " " + prompt)
+                .filter { $0 < tokenizer.specialTokens.specialTokenBegin }
+            // WhisperKit cannot reuse its fixed prefill cache when custom
+            // prompt tokens precede the language/task tokens.
+            promptedOptions.usePrefillPrompt = true
+            promptedOptions.usePrefillCache = false
 
             do {
-                let text = try await decode(options)
-                guard usesVocabularyPrompt, text.isEmpty else { return text }
-                Self.logger.notice(
-                    "Learned-vocabulary decode was empty; retrying without its prompt"
-                )
+                let prompted = try await decode(promptedOptions)
+                guard !prompted.text.isEmpty else {
+                    Self.logger.notice(
+                        "Relevant learned-vocabulary re-decode was empty; using baseline transcript"
+                    )
+                    return baseline.text
+                }
+                return prompted.text
             } catch {
-                guard usesVocabularyPrompt else { throw error }
                 Self.logger.error(
-                    "Learned-vocabulary decode failed; retrying without its prompt: \(String(describing: error), privacy: .public)"
+                    "Relevant learned-vocabulary re-decode failed; using baseline transcript: \(String(describing: error), privacy: .public)"
                 )
+                return baseline.text
             }
-
-            return try await decode(fallbackOptions)
         }
     }
 

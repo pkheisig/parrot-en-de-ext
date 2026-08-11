@@ -15,11 +15,12 @@ final class HotkeyMonitor {
     private var shortcut: HotkeyShortcut
     private var learningShortcut: HotkeyShortcut
     private let debug: Bool
-    private var onEvent: ((Event) -> Void)?
+    var onEvent: ((Event) -> Void)?
     private var tap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var isPressed = false
     private var isLearningPressed = false
+    private var learningRequestGeneration = 0
 
     init(
         shortcut: HotkeyShortcut = .fn,
@@ -39,6 +40,7 @@ final class HotkeyMonitor {
     func setLearningShortcut(_ shortcut: HotkeyShortcut) {
         learningShortcut = shortcut
         isLearningPressed = false
+        learningRequestGeneration += 1
     }
 
     fileprivate var currentShortcut: HotkeyShortcut { shortcut }
@@ -96,6 +98,7 @@ final class HotkeyMonitor {
         runLoopSource = nil
         onEvent = nil
         isLearningPressed = false
+        learningRequestGeneration += 1
     }
 
     /// Consume the Learn shortcut before the foreground application receives
@@ -109,14 +112,9 @@ final class HotkeyMonitor {
            keyCode == learningShortcut.keyCode,
            event.flags.intersection(Self.supportedModifiers) == learningShortcut.modifiers,
            !learningShortcut.isModifierOnly {
-            let shouldEmit = !isRepeat && !isLearningPressed
+            let shouldArm = !isRepeat && !isLearningPressed
             isLearningPressed = true
-            if shouldEmit {
-                let callback = onEvent
-                DispatchQueue.main.async {
-                    callback?(.learnCorrectionRequested)
-                }
-            }
+            if shouldArm { learningRequestGeneration += 1 }
             return true
         }
 
@@ -124,9 +122,40 @@ final class HotkeyMonitor {
            keyCode == learningShortcut.keyCode,
            isLearningPressed {
             isLearningPressed = false
+            scheduleLearningAfterModifierRelease(
+                generation: learningRequestGeneration
+            )
             return true
         }
         return false
+    }
+
+    /// Custom editors are read through a synthetic Command-C. Starting that
+    /// copy from the Learn key-down races the user's still-held Control/Option
+    /// modifiers, so Chromium receives a modified shortcut and leaves the
+    /// selection unreadable. Wait until the complete Learn chord is released.
+    private func scheduleLearningAfterModifierRelease(
+        generation: Int,
+        attempt: Int = 0
+    ) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in
+            guard let self,
+                  generation == self.learningRequestGeneration,
+                  !self.isLearningPressed
+            else { return }
+
+            let activeModifiers = CGEventSource.flagsState(.combinedSessionState)
+                .intersection(Self.supportedModifiers)
+            if !activeModifiers.intersection(self.learningShortcut.modifiers).isEmpty,
+               attempt < 150 {
+                self.scheduleLearningAfterModifierRelease(
+                    generation: generation,
+                    attempt: attempt + 1
+                )
+                return
+            }
+            self.onEvent?(.learnCorrectionRequested)
+        }
     }
 
     fileprivate func reenableTap() {

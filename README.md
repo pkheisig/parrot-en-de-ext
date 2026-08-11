@@ -63,10 +63,12 @@ mode. To teach a spelling:
 4. Confirm the extracted `recognized → corrected` mapping.
 
 For example, changing `spectra easy` to `Spectreasy` adds `Spectreasy` to the
-decoder context for later dictation. Whisper then considers that spelling while
-it maps new audio to text; Parrot no longer rewrites the completed transcript
-after recognition. This is inference-time vocabulary biasing, not model-weight
-training, so the audio stays local and no background training step is required.
+learned vocabulary. On later dictation, Whisper first performs its normal
+audio-led recognition. If it renders a learned form such as `spectra easy`,
+Parrot decodes the same audio again with `Spectreasy` in focused context. It
+does not rewrite the completed transcript afterward. This is inference-time
+vocabulary adaptation, not model-weight training, so the audio stays local and
+no background training step is required.
 
 Open **Dictionary…** in the menu-bar settings to add, edit, or remove terms.
 Entries are stored locally at
