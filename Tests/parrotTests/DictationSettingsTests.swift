@@ -91,12 +91,6 @@ final class DictationSettingsTests: XCTestCase {
         XCTAssertFalse(detectedGerman.detectLanguage)
         XCTAssertEqual(detectedGerman.language, "de")
         XCTAssertEqual(detectedGerman.chunkingStrategy, .vad)
-
-        XCTAssertEqual(
-            WhisperKitTranscriber.keepWarmDecodingOptions.chunkingStrategy?.rawValue,
-            "none"
-        )
-        XCTAssertEqual(WhisperKitTranscriber.keepWarmDecodingOptions.concurrentWorkerCount, 1)
     }
 
     func testProcessMemorySnapshotIncludesPhysicalFootprint() {

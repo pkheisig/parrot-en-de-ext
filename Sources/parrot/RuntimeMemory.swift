@@ -167,9 +167,8 @@ enum RuntimeMemoryLog {
     }
 }
 
-/// Releases loaded models when macOS reports memory pressure. This is a
-/// safety net alongside periodic warming; it never touches model files in
-/// Application Support.
+/// Releases loaded models when macOS reports memory pressure. It never touches
+/// model files in Application Support.
 final class RuntimeMemoryPressureMonitor {
     private let source: DispatchSourceMemoryPressure
 

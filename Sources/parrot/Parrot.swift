@@ -131,10 +131,6 @@ struct Run: ParsableCommand {
                 await transcriptionService.handleMemoryPressure()
             }
         }
-        let modelWarmupScheduler = ModelWarmupScheduler {
-            try await transcriptionService.keepWarm()
-        }
-
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
 
@@ -289,19 +285,6 @@ struct Run: ParsableCommand {
                     overlay?.show(.recording)
                     menuBar?.setRecording(true)
                 }
-                Task(priority: .userInitiated) {
-                    do {
-                        if try await transcriptionService.prepareForRecording() {
-                            FileHandle.standardError.write(Data(
-                                "model refreshed during recording\n".utf8
-                            ))
-                        }
-                    } catch {
-                        FileHandle.standardError.write(Data(
-                            "recording-start warmup failed: \(error)\n".utf8
-                        ))
-                    }
-                }
             case .released:
                 guard recordingMode == .hold, isRecording else { return }
                 isRecording = false
@@ -434,7 +417,6 @@ struct Run: ParsableCommand {
                 }
                 await MainActor.run {
                     readiness.modelReady = true
-                    modelWarmupScheduler.start()
                     if readiness.monitorStarted {
                         menuBar?.setReady(
                             modelID: readyModelID,
@@ -460,7 +442,6 @@ struct Run: ParsableCommand {
                 FileHandle.standardError.write(Data("warmup failed: \(warmupError)\n".utf8))
                 throw ExitCode(1)
             }
-            modelWarmupScheduler.start()
             do {
                 try monitor.start(onEvent: handleHotkey)
             } catch {
@@ -472,7 +453,6 @@ struct Run: ParsableCommand {
         let sigint = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
         sigint.setEventHandler {
             FileHandle.standardError.write(Data("\nshutting down\n".utf8))
-            modelWarmupScheduler.stop()
             monitor.stop()
             NSApp.terminate(nil)
         }
@@ -484,9 +464,7 @@ struct Run: ParsableCommand {
                 .utf8
         ))
         withExtendedLifetime(memoryPressureMonitor) {
-            withExtendedLifetime(modelWarmupScheduler) {
-                app.run()
-            }
+            app.run()
         }
     }
 }

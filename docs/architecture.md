@@ -8,9 +8,8 @@
 4. **On-device.** No network calls for transcription. Audio never leaves the machine.
 5. **Memory-aware local inference.** Automatic detection and transcription use
    one multilingual model; Whisper Small is the default, model weights warm in
-   the background at app startup, receive periodic low-priority maintenance
-   inferences, and release explicitly under memory pressure or configuration
-   changes.
+   the background once at app startup, and release explicitly under memory
+   pressure or configuration changes.
 6. **Language-specialized models.** German remains an explicit specialist for
    users who select German directly; full-size Large Turbo is available only as
    an explicit model selection.
@@ -105,8 +104,6 @@ protocol Transcriber {
     var modelID: String { get }
     func transcribe(_ audio: [Float]) async throws -> String
     func warmUp() async throws
-    func keepWarm() async throws
-    func cancelKeepWarm() async
     func unload() async
 }
 ```
@@ -138,16 +135,12 @@ WhisperKit warm-up includes three discarded seconds of silence after model
 loading. This forces Core ML to compile its inference graphs before a model is
 reported ready, without conditioning or retaining any priming transcript. The
 app bundle does this in a background startup task; the foreground CLI still
-warms before entering its monitoring loop. A two-minute low-priority scheduler
-then runs a discarded maintenance inference against the selected backend. A
-model not touched for 90 seconds is also refreshed when recording begins, which
-hides page-in and graph setup behind speech. In-flight backend warm-ups are
-allowed to drain through the same serial operation gate rather than being
-cancelled while Core ML may still own Metal work.
-This is a best-effort response to Core ML's device-specialized cache and mapped
-pages going cold; it cannot override macOS memory pressure. Memory pressure
-defers release until an active decode completes and suppresses timer-driven
-reload until the user requests another transcription.
+warms before entering its monitoring loop. Parrot deliberately does not repeat
+the discarded inference on a timer or at recording start: repeated Core ML and
+Metal graph execution can retain backend allocations for the lifetime of the
+process. Memory pressure defers model release until an active decode completes.
+Configuration changes load the replacement first, then explicitly unload every
+inactive pipeline, including pipelines created by superseded requests.
 
 `RuntimeMemory.swift` samples RSS and physical footprint during model load and
 transcription only when `PARROT_PROFILE_MEMORY=1` is set. This keeps task-info
@@ -350,7 +343,6 @@ parrot/
 
     Runtime/                    # scheduling and diagnostics
       AsyncOperationGate.swift
-      ModelWarmupScheduler.swift
       RuntimeClock.swift
 
     Transcription/              # the inference layer

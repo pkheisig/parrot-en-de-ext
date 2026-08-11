@@ -8,7 +8,6 @@ actor WhisperKitTranscriber: Transcriber {
     private let defaultLanguage: TranscriptionLanguage
     private var pipeline: WhisperKit?
     private var loadTask: Task<Void, Error>?
-    private var maintenanceTask: Task<Void, Error>?
     private let operationGate = AsyncOperationGate()
 
     init(
@@ -43,56 +42,6 @@ actor WhisperKitTranscriber: Transcriber {
             self.loadTask = nil
             throw error
         }
-    }
-
-    /// Re-runs a discarded inference without rebuilding the pipeline. Core ML
-    /// can evict its device-specialized cache or let model pages go cold after
-    /// a long idle period even while the Swift object remains alive.
-    func keepWarm() async throws {
-        if pipeline == nil || loadTask != nil {
-            try await warmUp()
-        }
-
-        let started = Date()
-        if let maintenanceTask {
-            try await maintenanceTask.value
-            return
-        }
-        let maintenanceTask = Task { [self] in
-            try await withOperation(priority: .maintenance) {
-                try Task.checkCancellation()
-                guard let pipeline else { throw TranscriberError.notLoaded }
-                let activity = ProcessInfo.processInfo.beginActivity(
-                    options: [.userInitiated, .latencyCritical],
-                    reason: "Keep the active Parrot transcription model responsive"
-                )
-                defer { ProcessInfo.processInfo.endActivity(activity) }
-                _ = try await pipeline.transcribe(
-                    audioArray: Self.inferenceWarmUpAudio,
-                    decodeOptions: Self.keepWarmDecodingOptions
-                )
-            }
-        }
-        self.maintenanceTask = maintenanceTask
-        do {
-            try await maintenanceTask.value
-            self.maintenanceTask = nil
-        } catch {
-            self.maintenanceTask = nil
-            throw error
-        }
-        let elapsed = Date().timeIntervalSince(started)
-        FileHandle.standardError.write(Data(
-            String(format: "  model keep-warm inference %.2fs\n", elapsed).utf8
-        ))
-    }
-
-    func cancelKeepWarm() async {
-        // Core ML may keep an async Metal prediction alive after Swift task
-        // cancellation has returned. Starting a user decode at that point can
-        // overlap two predictions on the same WhisperKit pipeline and abort in
-        // MPSGraph. The operation gate is intentionally allowed to drain the
-        // short primer instead; recording-start preparation hides that wait.
     }
 
     private func loadPipeline() async throws {
@@ -255,19 +204,6 @@ actor WhisperKitTranscriber: Transcriber {
 
     static let safeWorkerCount = 1
 
-    /// A fixed-language maintenance decode avoids spending time on language
-    /// detection while still exercising the same feature, encoder, prefill,
-    /// and decoder graph used by a real transcription.
-    static let keepWarmDecodingOptions: DecodingOptions = {
-        var options = WhisperKitTranscriber.decodingOptions(
-            languageCode: "en",
-            detectLanguage: false
-        )
-        options.concurrentWorkerCount = 1
-        options.chunkingStrategy = ChunkingStrategy.none
-        return options
-    }()
-
     /// Strip Whisper's non-speech bracket tokens ([BLANK_AUDIO], [MUSIC],
     /// (silence), <|nospeech|>, etc.) and collapse whitespace. When the model
     /// hears silence it emits these literally; we don't want to paste them.
@@ -332,11 +268,6 @@ actor TranscriptionService {
     private var activeLoads = 0
     private var cleanupRequested = false
     private var memoryPressurePending = false
-    private var warmupSuppressedAfterPressure = false
-    private var maintenanceWarmupActive = false
-    private var lastModelTouchAt: Date?
-
-    static let recordingWarmupStaleAfter: TimeInterval = 90
 
     init(
         model: TranscriptionModel,
@@ -378,12 +309,10 @@ actor TranscriptionService {
     }
 
     func warmUp() async throws {
-        warmupSuppressedAfterPressure = false
         activeLoads += 1
         do {
             if let explicitModel {
                 try await explicitModel.warmUp()
-                lastModelTouchAt = Date()
                 await finishLoad()
                 return
             }
@@ -391,7 +320,6 @@ actor TranscriptionService {
                 for: language,
                 modelPreference: modelPreference
             ).warmUp()
-            lastModelTouchAt = Date()
             // This only downloads the optional explicit German specialist. It
             // is not loaded into memory and never competes with the active model.
             if language != .german {
@@ -404,66 +332,7 @@ actor TranscriptionService {
         }
     }
 
-    /// Performs a maintenance inference only when the service is otherwise
-    /// idle. Returning false lets the scheduler skip a busy interval without
-    /// delaying user work or reloading a model that macOS intentionally
-    /// released under memory pressure.
-    func keepWarm() async throws -> Bool {
-        guard !warmupSuppressedAfterPressure,
-              activeTranscriptions == 0,
-              activeLoads == 0
-        else { return false }
-
-        activeLoads += 1
-        maintenanceWarmupActive = true
-        do {
-            if let explicitModel {
-                try await explicitModel.keepWarm()
-            } else {
-                try await transcriber(
-                    for: language,
-                    modelPreference: modelPreference
-                ).keepWarm()
-            }
-            lastModelTouchAt = Date()
-            maintenanceWarmupActive = false
-            await finishLoad()
-            return true
-        } catch {
-            maintenanceWarmupActive = false
-            await finishLoad()
-            throw error
-        }
-    }
-
-    /// Refreshes a stale or pressure-evicted model as soon as recording starts,
-    /// so model page-in and graph setup happen while the user is speaking rather
-    /// than after the hotkey is released.
-    func prepareForRecording(now: Date = Date()) async throws -> Bool {
-        guard activeTranscriptions == 0, activeLoads == 0 else { return false }
-        guard Self.needsRecordingWarmup(
-            lastModelTouchAt: lastModelTouchAt,
-            now: now,
-            wasReleasedUnderPressure: warmupSuppressedAfterPressure
-        ) else { return false }
-
-        warmupSuppressedAfterPressure = false
-        return try await keepWarm()
-    }
-
-    nonisolated static func needsRecordingWarmup(
-        lastModelTouchAt: Date?,
-        now: Date,
-        wasReleasedUnderPressure: Bool
-    ) -> Bool {
-        guard !wasReleasedUnderPressure else { return true }
-        guard let lastModelTouchAt else { return true }
-        return now.timeIntervalSince(lastModelTouchAt) >= recordingWarmupStaleAfter
-    }
-
     func setLanguage(_ language: TranscriptionLanguage) async throws -> String? {
-        await cancelMaintenanceWarmupIfNeeded()
-        warmupSuppressedAfterPressure = false
         configurationRequest += 1
         let request = configurationRequest
         if let explicitModel {
@@ -478,10 +347,12 @@ actor TranscriptionService {
         do {
             try await next.warmUp()
         } catch {
+            cleanupRequested = true
             await finishLoad()
             throw error
         }
         guard request == configurationRequest else {
+            cleanupRequested = true
             await finishLoad()
             return nil
         }
@@ -497,8 +368,6 @@ actor TranscriptionService {
     func setModelPreference(
         _ modelPreference: TranscriptionModelPreference
     ) async throws -> String? {
-        await cancelMaintenanceWarmupIfNeeded()
-        warmupSuppressedAfterPressure = false
         configurationRequest += 1
         let request = configurationRequest
         if let explicitModel {
@@ -514,10 +383,12 @@ actor TranscriptionService {
         do {
             try await next.warmUp()
         } catch {
+            cleanupRequested = true
             await finishLoad()
             throw error
         }
         guard request == configurationRequest else {
+            cleanupRequested = true
             await finishLoad()
             return nil
         }
@@ -528,8 +399,6 @@ actor TranscriptionService {
     }
 
     func transcribe(_ audio: [Float]) async throws -> String {
-        await cancelMaintenanceWarmupIfNeeded()
-        warmupSuppressedAfterPressure = false
         activeTranscriptions += 1
         do {
             let raw: String
@@ -553,7 +422,6 @@ actor TranscriptionService {
                 }
             }
             let result = dictionary.apply(to: raw)
-            lastModelTouchAt = Date()
             await finishTranscription()
             return result
         } catch {
@@ -584,8 +452,6 @@ actor TranscriptionService {
     /// Called by the menu-bar process when macOS reports memory pressure.
     /// During a decode we defer release until the active operation has finished.
     func handleMemoryPressure() async {
-        warmupSuppressedAfterPressure = true
-        await cancelMaintenanceWarmupIfNeeded()
         if activeTranscriptions > 0 || activeLoads > 0 {
             memoryPressurePending = true
             cleanupRequested = true
@@ -657,22 +523,7 @@ actor TranscriptionService {
         }
         memoryPressurePending = false
         cleanupRequested = false
-        lastModelTouchAt = nil
         RuntimeMemoryLog.write("all-models-released")
-    }
-
-    private func cancelMaintenanceWarmupIfNeeded() async {
-        guard maintenanceWarmupActive else { return }
-        let activeTranscriber: any Transcriber
-        if let explicitModel {
-            activeTranscriber = explicitModel
-        } else {
-            activeTranscriber = transcriber(
-                for: language,
-                modelPreference: modelPreference
-            )
-        }
-        await activeTranscriber.cancelKeepWarm()
     }
 
     private nonisolated static func makeTranscriber(

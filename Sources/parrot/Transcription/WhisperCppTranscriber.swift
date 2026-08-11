@@ -9,7 +9,6 @@ actor WhisperCppTranscriber: Transcriber {
     private let dictionary: CorrectionDictionaryStore?
     private var context: OpaquePointer?
     private var loadTask: Task<Void, Error>?
-    private var maintenanceTask: Task<Void, Error>?
     private let operationGate = AsyncOperationGate()
 
     init(model: TranscriptionModel, dictionary: CorrectionDictionaryStore? = nil) {
@@ -43,45 +42,6 @@ actor WhisperCppTranscriber: Transcriber {
             self.loadTask = nil
             throw error
         }
-    }
-
-    /// Touch the Metal-backed context periodically so an idle app is less
-    /// likely to pay page-in or backend setup cost on the next dictation.
-    func keepWarm() async throws {
-        if context == nil || loadTask != nil {
-            try await warmUp()
-        }
-        if let maintenanceTask {
-            try await maintenanceTask.value
-            return
-        }
-        let maintenanceTask = Task { [self] in
-            try await withOperation(priority: .maintenance) {
-                try Task.checkCancellation()
-                let activity = ProcessInfo.processInfo.beginActivity(
-                    options: [.userInitiated, .latencyCritical],
-                    reason: "Keep the active Parrot transcription model responsive"
-                )
-                defer { ProcessInfo.processInfo.endActivity(activity) }
-                _ = try decode(
-                    WhisperKitTranscriber.inferenceWarmUpAudio,
-                    includePrompt: false
-                )
-            }
-        }
-        self.maintenanceTask = maintenanceTask
-        do {
-            try await maintenanceTask.value
-            self.maintenanceTask = nil
-        } catch {
-            self.maintenanceTask = nil
-            throw error
-        }
-    }
-
-    func cancelKeepWarm() async {
-        // Let an in-flight Metal decode drain before user work enters the gate.
-        // Canceling the Swift task does not guarantee backend work has stopped.
     }
 
     private func loadContext() async throws {

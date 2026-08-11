@@ -81,17 +81,15 @@ path skips timestamp generation. Select **Large Turbo** in the **Model** setting
 explicitly want the slower 1.62 GB quality model. German remains an explicit
 548 MB whisper.cpp specialist and ignores the multilingual model selection.
 
-The app downloads, loads, and primes the selected model in the background at
-startup, then keeps it hot for fast repeated dictation. A low-priority,
-best-effort maintenance inference runs every two minutes to touch Core ML and
-Metal resources after long idle periods. If the last model touch is stale,
-Parrot also refreshes it when recording starts so page-in happens while you
-speak instead of after you stop. Only one inference model is kept resident: switching the language or
-model loads the replacement before releasing the inactive pipeline. macOS
-memory pressure remains the emergency unload path, and the timer does not
-reload a model that macOS explicitly released until the user dictates again.
-This reduces cold-start risk but cannot guarantee that macOS keeps model pages
-in RAM. Audio remains on the Mac; only model downloads use the network.
+The app downloads, loads, and primes the selected model once in the background
+at startup, then reuses that pipeline for repeated dictation. It does not run
+periodic or recording-start maintenance inferences: repeated silent decodes can
+accumulate Core ML and Metal allocations over a long-running session. Only one
+inference model is kept resident. Switching the language or model loads the
+replacement and then explicitly unloads the inactive pipeline; superseded or
+failed configuration requests are cleaned up as well. macOS memory pressure
+remains the emergency unload path. Audio remains on the Mac; only model
+downloads use the network.
 
 > **Note:** on most modern Macs the `fn` key is the bottom-left key. If you keep Fn as your shortcut and it is set to "Change input source" or "Show emoji & symbols," `parrot setup` will tell you how to flip it back to plain `fn`.
 
