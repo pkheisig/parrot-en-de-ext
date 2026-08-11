@@ -12,7 +12,7 @@ struct Parrot: ParsableCommand {
         abstract: "Minimal macOS dictation daemon with a configurable global hotkey.",
         subcommands: [
             Run.self, Setup.self, Doctor.self, Models.self, Install.self,
-            TranscribeFile.self, DeliverTest.self,
+            TranscribeFile.self, DeliverTest.self, LearnCaptureTest.self,
         ],
         defaultSubcommand: Run.self
     )
@@ -609,7 +609,11 @@ private func deliverTranscript(
         to: target,
         verificationSnapshot: snapshot
     )
-    learningController.remember(insertedText: text, snapshot: snapshot)
+    learningController.remember(
+        insertedText: text,
+        snapshot: snapshot,
+        processIdentifier: target?.processIdentifier
+    )
     menuBar?.setRecording(false)
 
     switch delivery {

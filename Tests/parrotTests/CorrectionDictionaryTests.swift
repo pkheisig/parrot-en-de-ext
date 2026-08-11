@@ -3,6 +3,95 @@ import XCTest
 @testable import parrot
 
 final class CorrectionDictionaryTests: XCTestCase {
+    @MainActor
+    func testLearningTargetsOriginalAppAndDiffsWholeEditedTranscript() throws {
+        var selectedTargets: [pid_t?] = []
+        var wholeTargets: [pid_t?] = []
+        let capture = EditorTextCapture(
+            selectedText: { processIdentifier in
+                selectedTargets.append(processIdentifier)
+                return nil
+            },
+            wholeText: { processIdentifier in
+                wholeTargets.append(processIdentifier)
+                return "Earlier text. This is a test for Spectreasy. Later text."
+            }
+        )
+        let controller = CorrectionLearningController(
+            editorTextCapture: capture
+        )
+        controller.remember(
+            insertedText: "This is a test for spectra easy.",
+            snapshot: nil,
+            processIdentifier: 12_584
+        )
+
+        XCTAssertEqual(
+            try controller.proposals(),
+            [CorrectionProposal(alias: "spectra easy", canonical: "Spectreasy")]
+        )
+        XCTAssertEqual(selectedTargets.compactMap { $0 }, [12_584])
+        XCTAssertEqual(wholeTargets.compactMap { $0 }, [12_584])
+    }
+
+    @MainActor
+    func testLearningReportsUnreadableOriginalAppDistinctly() {
+        let controller = CorrectionLearningController(
+            editorTextCapture: EditorTextCapture(
+                selectedText: { _ in nil },
+                wholeText: { _ in nil }
+            )
+        )
+        controller.remember(
+            insertedText: "This is a test for spectra easy.",
+            snapshot: nil,
+            processIdentifier: 12_584
+        )
+
+        XCTAssertThrowsError(try controller.proposals()) { error in
+            XCTAssertEqual(error as? CorrectionLearningError, .focusChanged)
+        }
+    }
+
+    @MainActor
+    func testLearningReportsNoChangesWhenOriginalAppIsReadable() {
+        let controller = CorrectionLearningController(
+            editorTextCapture: EditorTextCapture(
+                selectedText: { _ in nil },
+                wholeText: { _ in "This is a test for spectra easy." }
+            )
+        )
+        controller.remember(
+            insertedText: "This is a test for spectra easy.",
+            snapshot: nil,
+            processIdentifier: 12_584
+        )
+
+        XCTAssertThrowsError(try controller.proposals()) { error in
+            XCTAssertEqual(error as? CorrectionLearningError, .noChanges)
+        }
+    }
+
+    @MainActor
+    func testLearningUsesCorrectedSelectionWhenWholeEditorCannotBeRead() throws {
+        let controller = CorrectionLearningController(
+            editorTextCapture: EditorTextCapture(
+                selectedText: { _ in "Spectreasy" },
+                wholeText: { _ in nil }
+            )
+        )
+        controller.remember(
+            insertedText: "This is a test for spectra easy.",
+            snapshot: nil,
+            processIdentifier: 12_584
+        )
+
+        XCTAssertEqual(
+            try controller.proposals(),
+            [CorrectionProposal(alias: "spectra easy", canonical: "Spectreasy")]
+        )
+    }
+
     func testUpsertKeepsOneMappingPerAliasAndBuildsDeduplicatedPrompt() {
         let store = CorrectionDictionaryStore(persistent: false)
         store.upsert(alias: "spectra easy", canonical: "Spectreasy")
@@ -138,6 +227,25 @@ final class CorrectionDictionaryTests: XCTestCase {
                 for: "My package is called spectra easy."
             ),
             "My package is called Spectreasy"
+        )
+    }
+
+    func testFindsCorrectionDespiteUnrelatedTextBeforeAndAfterComposerContent() {
+        let field = "Prefix words. This is a test for Spectreasy. Suffix words."
+        let corrected = CorrectionDiff.bestCorrectedTranscript(
+            in: field,
+            for: "This is a test for spectra easy."
+        )
+
+        XCTAssertEqual(corrected, "This is a test for Spectreasy")
+        XCTAssertEqual(
+            corrected.map {
+                CorrectionDiff.proposals(
+                    original: "This is a test for spectra easy.",
+                    corrected: $0
+                )
+            },
+            [CorrectionProposal(alias: "spectra easy", canonical: "Spectreasy")]
         )
     }
 }

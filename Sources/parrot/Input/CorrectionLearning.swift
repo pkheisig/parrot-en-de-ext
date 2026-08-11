@@ -15,11 +15,29 @@ enum CorrectionLearningError: LocalizedError {
         case .expired:
             "The last transcript is too old. Dictate, correct, then learn within five minutes."
         case .focusChanged:
-            "Parrot could not read the edited field. Select the corrected phrase and try again."
+            "Parrot could not read the edited transcript from the original app. Keep that field focused and try Learn again."
         case .noChanges:
             "No learnable spelling change was found."
         }
     }
+}
+
+struct EditorTextCapture {
+    let selectedText: (pid_t?) -> String?
+    let wholeText: (pid_t?) -> String?
+
+    static let live = EditorTextCapture(
+        selectedText: { processIdentifier in
+            ClipboardTextCapture.selectedText(
+                processIdentifier: processIdentifier
+            )
+        },
+        wholeText: { processIdentifier in
+            ClipboardTextCapture.wholeFocusedEditorText(
+                processIdentifier: processIdentifier
+            )
+        }
+    )
 }
 
 @MainActor
@@ -27,20 +45,31 @@ final class CorrectionLearningController {
     private struct Session {
         let insertedText: String
         let snapshot: FocusedTextSnapshot?
+        let processIdentifier: pid_t?
         let createdAt: Date
     }
 
     private let lifetime: TimeInterval
+    private let editorTextCapture: EditorTextCapture
     private var session: Session?
 
-    init(lifetime: TimeInterval = 5 * 60) {
+    init(
+        lifetime: TimeInterval = 5 * 60,
+        editorTextCapture: EditorTextCapture = .live
+    ) {
         self.lifetime = lifetime
+        self.editorTextCapture = editorTextCapture
     }
 
-    func remember(insertedText: String, snapshot: FocusedTextSnapshot?) {
+    func remember(
+        insertedText: String,
+        snapshot: FocusedTextSnapshot?,
+        processIdentifier: pid_t? = nil
+    ) {
         session = Session(
             insertedText: insertedText,
             snapshot: snapshot,
+            processIdentifier: processIdentifier,
             createdAt: Date()
         )
     }
@@ -67,7 +96,9 @@ final class CorrectionLearningController {
             if !proposals.isEmpty { return proposals }
         }
 
-        if let selected = FocusedTextSnapshot.selectedText() {
+        if let selected = FocusedTextSnapshot.selectedText(
+            processIdentifier: session.processIdentifier
+        ) {
             readEditableText = true
             if let proposals = CorrectionDiff.proposalsFromSelection(
                 original: session.insertedText,
@@ -80,7 +111,7 @@ final class CorrectionLearningController {
         // Custom web and Electron editors frequently hide their value and
         // selection from AX. Their native Copy command is considerably more
         // interoperable, so use it without permanently changing the clipboard.
-        if let selected = ClipboardTextCapture.selectedText() {
+        if let selected = editorTextCapture.selectedText(session.processIdentifier) {
             readEditableText = true
             if let proposals = CorrectionDiff.proposalsFromSelection(
                 original: session.insertedText,
@@ -90,7 +121,7 @@ final class CorrectionLearningController {
             }
         }
 
-        if let fieldText = ClipboardTextCapture.wholeFocusedEditorText() {
+        if let fieldText = editorTextCapture.wholeText(session.processIdentifier) {
             readEditableText = true
             if let correctedTranscript = CorrectionDiff.bestCorrectedTranscript(
                 in: fieldText,
@@ -208,8 +239,10 @@ struct FocusedTextSnapshot: Sendable {
         return string.substring(with: NSRange(location: start, length: end - start))
     }
 
-    static func selectedText() -> String? {
-        guard let element = focusedElement() else { return nil }
+    static func selectedText(processIdentifier: pid_t? = nil) -> String? {
+        let element = processIdentifier.flatMap(focusedElement(for:))
+            ?? (processIdentifier == nil ? focusedElement() : nil)
+        guard let element else { return nil }
         var raw: CFTypeRef?
         if AXUIElementCopyAttributeValue(
             element,
@@ -476,16 +509,19 @@ enum CorrectionDiff {
 
 /// Reads custom editors through their standard Copy command while preserving
 /// the user's clipboard. This avoids depending on app-specific AX text APIs.
-private enum ClipboardTextCapture {
-    static func selectedText() -> String? {
-        capture(selectAll: false)
+enum ClipboardTextCapture {
+    static func selectedText(processIdentifier: pid_t? = nil) -> String? {
+        capture(selectAll: false, processIdentifier: processIdentifier)
     }
 
-    static func wholeFocusedEditorText() -> String? {
-        capture(selectAll: true)
+    static func wholeFocusedEditorText(processIdentifier: pid_t? = nil) -> String? {
+        capture(selectAll: true, processIdentifier: processIdentifier)
     }
 
-    private static func capture(selectAll: Bool) -> String? {
+    private static func capture(
+        selectAll: Bool,
+        processIdentifier: pid_t?
+    ) -> String? {
         let pasteboard = NSPasteboard.general
         let snapshot = PasteboardSnapshot(pasteboard: pasteboard)
         defer { snapshot.restore(to: pasteboard) }
@@ -496,10 +532,18 @@ private enum ClipboardTextCapture {
         let sentinelChangeCount = pasteboard.changeCount
 
         if selectAll {
-            postKey(0, modifiers: .maskCommand) // Command-A
+            postKey(
+                0,
+                modifiers: .maskCommand,
+                processIdentifier: processIdentifier
+            ) // Command-A
             Thread.sleep(forTimeInterval: 0.04)
         }
-        postKey(8, modifiers: .maskCommand) // Command-C
+        postKey(
+            8,
+            modifiers: .maskCommand,
+            processIdentifier: processIdentifier
+        ) // Command-C
 
         let deadline = Date().addingTimeInterval(0.35)
         while pasteboard.changeCount == sentinelChangeCount, Date() < deadline {
@@ -509,7 +553,11 @@ private enum ClipboardTextCapture {
         let copied = pasteboard.string(forType: .string)
         if selectAll {
             // Do not leave the user's editor with all content selected.
-            postKey(124, modifiers: []) // Right Arrow, collapse at the end.
+            postKey(
+                124,
+                modifiers: [],
+                processIdentifier: processIdentifier
+            ) // Right Arrow, collapse at the end.
             Thread.sleep(forTimeInterval: 0.03)
         }
         guard let copied,
@@ -520,7 +568,11 @@ private enum ClipboardTextCapture {
         return copied
     }
 
-    private static func postKey(_ keyCode: CGKeyCode, modifiers: CGEventFlags) {
+    private static func postKey(
+        _ keyCode: CGKeyCode,
+        modifiers: CGEventFlags,
+        processIdentifier: pid_t?
+    ) {
         let source = CGEventSource(stateID: .combinedSessionState)
         let down = CGEvent(
             keyboardEventSource: source,
@@ -528,14 +580,22 @@ private enum ClipboardTextCapture {
             keyDown: true
         )
         down?.flags = modifiers
-        down?.post(tap: .cgSessionEventTap)
+        if let processIdentifier {
+            down?.postToPid(processIdentifier)
+        } else {
+            down?.post(tap: .cgSessionEventTap)
+        }
         let up = CGEvent(
             keyboardEventSource: source,
             virtualKey: keyCode,
             keyDown: false
         )
         up?.flags = modifiers
-        up?.post(tap: .cgSessionEventTap)
+        if let processIdentifier {
+            up?.postToPid(processIdentifier)
+        } else {
+            up?.post(tap: .cgSessionEventTap)
+        }
     }
 }
 
