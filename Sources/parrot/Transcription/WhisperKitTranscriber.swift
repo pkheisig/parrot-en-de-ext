@@ -1,8 +1,14 @@
 import Foundation
 import CoreML
+import OSLog
 import WhisperKit
 
 actor WhisperKitTranscriber: Transcriber {
+    private static let logger = Logger(
+        subsystem: "com.pkheisig.parrot",
+        category: "transcription"
+    )
+
     let modelID: String
     private let model: TranscriptionModel
     private let defaultLanguage: TranscriptionLanguage
@@ -117,7 +123,9 @@ actor WhisperKitTranscriber: Transcriber {
 
             let memory = MemoryPeakTracker(label: "transcribe \(model.id)")
             defer { memory.logFinish() }
-            var options = Self.decodingOptions(languageCode: languageCode)
+            let fallbackOptions = Self.decodingOptions(languageCode: languageCode)
+            var options = fallbackOptions
+            var usesVocabularyPrompt = false
             if let prompt = dictionary?.promptText(),
                let tokenizer = pipeline.tokenizer {
                 options.promptTokens = tokenizer
@@ -127,20 +135,38 @@ actor WhisperKitTranscriber: Transcriber {
                 // prompt tokens precede the language/task tokens.
                 options.usePrefillPrompt = true
                 options.usePrefillCache = false
+                usesVocabularyPrompt = true
             }
 
-            let results = try await pipeline.transcribe(
-                audioArray: audio,
-                decodeOptions: options
-            )
-            let raw = results.map(\.text).joined(separator: " ")
-            let sanitized = Self.sanitize(raw)
-            if sanitized.isEmpty, !raw.isEmpty {
-                FileHandle.standardError.write(Data(
-                    "Whisper returned only non-speech tokens: \(raw)\n".utf8
-                ))
+            func decode(_ decodeOptions: DecodingOptions) async throws -> String {
+                let results = try await pipeline.transcribe(
+                    audioArray: audio,
+                    decodeOptions: decodeOptions
+                )
+                let raw = results.map(\.text).joined(separator: " ")
+                let sanitized = Self.sanitize(raw)
+                if sanitized.isEmpty, !raw.isEmpty {
+                    FileHandle.standardError.write(Data(
+                        "Whisper returned only non-speech tokens: \(raw)\n".utf8
+                    ))
+                }
+                return sanitized
             }
-            return sanitized
+
+            do {
+                let text = try await decode(options)
+                guard usesVocabularyPrompt, text.isEmpty else { return text }
+                Self.logger.notice(
+                    "Learned-vocabulary decode was empty; retrying without its prompt"
+                )
+            } catch {
+                guard usesVocabularyPrompt else { throw error }
+                Self.logger.error(
+                    "Learned-vocabulary decode failed; retrying without its prompt: \(String(describing: error), privacy: .public)"
+                )
+            }
+
+            return try await decode(fallbackOptions)
         }
     }
 
