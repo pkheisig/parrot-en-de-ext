@@ -35,8 +35,9 @@ extension Notification.Name {
 
 /// Thread-safe, universal correction dictionary shared by both language paths.
 ///
-/// Canonical terms are used as decoder prompts after language recognition.
-/// Aliases are also applied deterministically to the finished transcript.
+/// Canonical terms condition the decoder while it recognizes the next utterance.
+/// Aliases retain what the model previously heard so the learned vocabulary can
+/// be inspected and updated without rewriting completed transcripts.
 final class CorrectionDictionaryStore: @unchecked Sendable {
     private let lock = NSLock()
     private let fileURL: URL?
@@ -134,44 +135,24 @@ final class CorrectionDictionaryStore: @unchecked Sendable {
         if changed { notifyChanged() }
     }
 
-    func apply(to text: String) -> String {
-        var result = text
-        let replacements = entries.sorted {
-            $0.alias.utf16.count > $1.alias.utf16.count
-        }
-        for entry in replacements {
-            let escaped = NSRegularExpression.escapedPattern(for: entry.alias)
-            let pattern = #"(?<![\p{L}\p{N}])\#(escaped)(?![\p{L}\p{N}])"#
-            guard let expression = try? NSRegularExpression(
-                pattern: pattern,
-                options: [.caseInsensitive]
-            ) else { continue }
-            let fullRange = NSRange(result.startIndex..., in: result)
-            result = expression.stringByReplacingMatches(
-                in: result,
-                range: fullRange,
-                withTemplate: NSRegularExpression.escapedTemplate(for: entry.canonical)
-            )
-        }
-        return result
-    }
-
     /// Keeps prompts short enough for Whisper's prompt context while preferring
-    /// the newest learned spellings.
+    /// the newest learned spellings. Whisper keeps the suffix when it has to
+    /// trim a prompt, so the most recently learned terms are emitted last.
     func promptText(maximumCharacters: Int = 700) -> String? {
         var seen = Set<String>()
-        var terms: [String] = []
+        var sentences: [String] = []
         var length = 0
         for entry in entries {
             let key = Self.normalized(entry.canonical)
             guard seen.insert(key).inserted else { continue }
-            let addedLength = entry.canonical.count + (terms.isEmpty ? 0 : 2)
+            let sentence = "Technical vocabulary includes \(entry.canonical)."
+            let addedLength = sentence.count + (sentences.isEmpty ? 0 : 1)
             guard length + addedLength <= maximumCharacters else { break }
-            terms.append(entry.canonical)
+            sentences.append(sentence)
             length += addedLength
         }
-        guard !terms.isEmpty else { return nil }
-        return "Preferred vocabulary: \(terms.joined(separator: ", "))."
+        guard !sentences.isEmpty else { return nil }
+        return sentences.reversed().joined(separator: " ")
     }
 
     private func persistLocked() {

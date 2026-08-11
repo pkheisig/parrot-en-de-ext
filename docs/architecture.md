@@ -14,7 +14,8 @@
    users who select German directly; full-size Large Turbo is available only as
    an explicit model selection.
 7. **Learned vocabulary.** Compare the last inserted transcript with the user's
-   in-place correction and persist a universal alias-to-canonical mapping.
+   in-place correction and use the canonical spelling to condition later
+   speech decoding.
 8. **Native and lean.** One Swift Package executable target. No sidecar processes. No HTTP servers.
 
 ## Non-goals
@@ -192,10 +193,10 @@ transcript.
 ### `CorrectionDictionaryStore`
 
 Persists universal `recognized → canonical` mappings in Application Support.
-Canonical terms prompt the compatible German specialist only after language
-selection; aliases are then applied to every finished transcript using
-case-insensitive, longest-first, Unicode word-boundary matching. The language
-detector is deliberately never prompted by the dictionary.
+The alias records what the model previously heard; canonical terms are encoded
+as prompt tokens for WhisperKit and passed as the whisper.cpp initial prompt.
+This conditions English, German, and Automatic recognition before a transcript
+is returned. Parrot does not rewrite the completed transcript afterward.
 
 ### `RecordingOverlay`
 

@@ -6,18 +6,21 @@ actor WhisperKitTranscriber: Transcriber {
     let modelID: String
     private let model: TranscriptionModel
     private let defaultLanguage: TranscriptionLanguage
+    private let dictionary: CorrectionDictionaryStore?
     private var pipeline: WhisperKit?
     private var loadTask: Task<Void, Error>?
     private let operationGate = AsyncOperationGate()
 
     init(
         model: TranscriptionModel,
-        language: TranscriptionLanguage = .english
+        language: TranscriptionLanguage = .english,
+        dictionary: CorrectionDictionaryStore? = nil
     ) {
         self.modelID = model.id
         self.model = model
         // English-only checkpoints cannot perform language detection.
         self.defaultLanguage = model.languages.contains("multi") ? language : .english
+        self.dictionary = dictionary
     }
 
     /// Loads the model into memory; downloads first if not already on disk, then
@@ -114,9 +117,21 @@ actor WhisperKitTranscriber: Transcriber {
 
             let memory = MemoryPeakTracker(label: "transcribe \(model.id)")
             defer { memory.logFinish() }
+            var options = Self.decodingOptions(languageCode: languageCode)
+            if let prompt = dictionary?.promptText(),
+               let tokenizer = pipeline.tokenizer {
+                options.promptTokens = tokenizer
+                    .encode(text: " " + prompt)
+                    .filter { $0 < tokenizer.specialTokens.specialTokenBegin }
+                // WhisperKit cannot reuse its fixed prefill cache when custom
+                // prompt tokens precede the language/task tokens.
+                options.usePrefillPrompt = true
+                options.usePrefillCache = false
+            }
+
             let results = try await pipeline.transcribe(
                 audioArray: audio,
-                decodeOptions: Self.decodingOptions(languageCode: languageCode)
+                decodeOptions: options
             )
             let raw = results.map(\.text).joined(separator: " ")
             let sanitized = Self.sanitize(raw)
@@ -263,7 +278,6 @@ actor TranscriptionService {
     private var modelPreference: TranscriptionModelPreference
     private var configurationRequest = 0
     private let explicitModel: (any Transcriber)?
-    private let dictionary: CorrectionDictionaryStore
     private var activeTranscriptions = 0
     private var activeLoads = 0
     private var cleanupRequested = false
@@ -287,14 +301,15 @@ actor TranscriptionService {
             preconditionFailure("Required transcription models are not registered")
         }
         let dictionary = dictionary ?? CorrectionDictionaryStore()
-        self.dictionary = dictionary
         self.smallMultilingual = WhisperKitTranscriber(
             model: smallModel,
-            language: .automatic
+            language: .automatic,
+            dictionary: dictionary
         )
         self.largeMultilingual = WhisperKitTranscriber(
             model: largeModel,
-            language: .automatic
+            language: .automatic,
+            dictionary: dictionary
         )
         self.german = WhisperCppTranscriber(model: germanModel, dictionary: dictionary)
         self.language = language
@@ -421,9 +436,8 @@ actor TranscriptionService {
                     ).transcribe(audio, languageCode: nil)
                 }
             }
-            let result = dictionary.apply(to: raw)
             await finishTranscription()
-            return result
+            return raw
         } catch {
             await finishTranscription()
             throw error
@@ -535,7 +549,8 @@ actor TranscriptionService {
         case .whisperKit:
             WhisperKitTranscriber(
                 model: model,
-                language: language
+                language: language,
+                dictionary: dictionary
             )
         case .whisperCpp:
             WhisperCppTranscriber(model: model, dictionary: dictionary)

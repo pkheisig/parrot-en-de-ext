@@ -165,7 +165,8 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
             )
             let alert = NSAlert()
             alert.messageText = "Learn correction?"
-            alert.informativeText = "The recognized text becomes an alias for your spelling."
+            alert.informativeText =
+                "Parrot will bias future dictation toward the corrected spelling."
             alert.alertStyle = .informational
             alert.accessoryView = fields
             alert.addButton(withTitle: "Learn")
@@ -673,7 +674,7 @@ private final class CorrectionFieldsView: NSView {
         canonicalField.placeholderString = "Correct spelling"
 
         let aliasRow = Self.row(label: "Recognized", field: aliasField)
-        let canonicalRow = Self.row(label: "Replace with", field: canonicalField)
+        let canonicalRow = Self.row(label: "Preferred", field: canonicalField)
         let stack = NSStackView(views: [aliasRow, canonicalRow])
         stack.orientation = .vertical
         stack.spacing = 8
@@ -729,20 +730,20 @@ private final class DictionaryWindowController:
         window.isReleasedWhenClosed = false
         super.init(window: window)
 
-        let title = NSTextField(labelWithString: "Universal correction dictionary")
+        let title = NSTextField(labelWithString: "Learned vocabulary")
         title.font = .systemFont(ofSize: 15, weight: .semibold)
         let detail = NSTextField(
             wrappingLabelWithString:
-                "Applied after English or German recognition. Double-click a cell to edit."
+                "Used by the speech decoder during recognition. Double-click a cell to edit."
         )
         detail.textColor = .secondaryLabelColor
         detail.font = .systemFont(ofSize: 11)
 
         let aliasColumn = NSTableColumn(identifier: .init("alias"))
-        aliasColumn.title = "Recognized"
+        aliasColumn.title = "Previously heard"
         aliasColumn.minWidth = 180
         let canonicalColumn = NSTableColumn(identifier: .init("canonical"))
-        canonicalColumn.title = "Replace with"
+        canonicalColumn.title = "Preferred spelling"
         canonicalColumn.minWidth = 180
         tableView.addTableColumn(aliasColumn)
         tableView.addTableColumn(canonicalColumn)

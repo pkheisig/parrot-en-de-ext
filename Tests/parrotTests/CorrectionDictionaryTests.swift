@@ -3,22 +3,6 @@ import XCTest
 @testable import parrot
 
 final class CorrectionDictionaryTests: XCTestCase {
-    func testAppliesUniversalCorrectionsAtBoundariesAndLongestFirst() {
-        let store = CorrectionDictionaryStore(persistent: false)
-        XCTAssertNotNil(store.upsert(alias: "spectra", canonical: "Spectra"))
-        XCTAssertNotNil(store.upsert(alias: "spectra easy", canonical: "Spectreasy"))
-        XCTAssertNotNil(store.upsert(alias: "O M I P", canonical: "OMIP"))
-
-        XCTAssertEqual(
-            store.apply(to: "Use SPECTRA EASY with O M I P."),
-            "Use Spectreasy with OMIP."
-        )
-        XCTAssertEqual(
-            store.apply(to: "The spectra easygoing example is unrelated."),
-            "The Spectra easygoing example is unrelated."
-        )
-    }
-
     func testUpsertKeepsOneMappingPerAliasAndBuildsDeduplicatedPrompt() {
         let store = CorrectionDictionaryStore(persistent: false)
         store.upsert(alias: "spectra easy", canonical: "Spectreasy")
@@ -26,13 +10,37 @@ final class CorrectionDictionaryTests: XCTestCase {
         store.upsert(alias: "SPECTRA EASY", canonical: "Spectreasy 2")
 
         XCTAssertEqual(store.entries.count, 2)
-        XCTAssertEqual(
-            store.apply(to: "spectra easy and spectr easy"),
-            "Spectreasy 2 and Spectreasy"
-        )
         let prompt = store.promptText()
         XCTAssertTrue(prompt?.contains("Spectreasy 2") == true)
         XCTAssertTrue(prompt?.contains("Spectreasy") == true)
+    }
+
+    func testPromptPlacesNewestVocabularyAtTheDecoderKeptSuffix() {
+        let older = Date(timeIntervalSince1970: 1)
+        let newer = Date(timeIntervalSince1970: 2)
+        let store = CorrectionDictionaryStore(
+            persistent: false,
+            initialEntries: [
+                CorrectionEntry(
+                    alias: "older",
+                    canonical: "OlderTerm",
+                    createdAt: older,
+                    updatedAt: older
+                ),
+                CorrectionEntry(
+                    alias: "newer",
+                    canonical: "NewestTerm",
+                    createdAt: newer,
+                    updatedAt: newer
+                ),
+            ]
+        )
+
+        XCTAssertEqual(
+            store.promptText(),
+            "Technical vocabulary includes OlderTerm. "
+                + "Technical vocabulary includes NewestTerm."
+        )
     }
 
     func testPersistsAndReloadsEntries() throws {

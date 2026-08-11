@@ -54,21 +54,21 @@ That's it. There is no record button or "send" button—the configured global sh
 
 ## Learn names and specialist vocabulary
 
-Parrot has one universal correction dictionary shared by English, German, and
-Automatic mode. To teach a spelling:
+Parrot has one learned vocabulary shared by English, German, and Automatic
+mode. To teach a spelling:
 
 1. Dictate normally and let Parrot insert the transcript.
 2. Correct the misspelled word or phrase in place.
 3. Press **Control–Option–L** (configurable as **Learn** in the menu-bar settings).
 4. Confirm the extracted `recognized → corrected` mapping.
 
-For example, changing `spectra easy` to `Spectreasy` teaches Parrot to replace
-that recognition next time. Learned aliases are applied deterministically to
-both English and German output; the German specialist also receives canonical
-spellings as prompt vocabulary. The dictionary is never supplied to
-the automatic language detector.
+For example, changing `spectra easy` to `Spectreasy` adds `Spectreasy` to the
+decoder context for later dictation. Whisper then considers that spelling while
+it maps new audio to text; Parrot no longer rewrites the completed transcript
+after recognition. This is inference-time vocabulary biasing, not model-weight
+training, so the audio stays local and no background training step is required.
 
-Open **Dictionary…** in the menu-bar settings to add, edit, or remove mappings.
+Open **Dictionary…** in the menu-bar settings to add, edit, or remove terms.
 Entries are stored locally at
 `~/Library/Application Support/Parrot/Dictionary/corrections.json`.
 
